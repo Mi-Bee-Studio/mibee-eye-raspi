@@ -62,6 +62,32 @@ func (m *mockImagingCamera) getParam(name string) interface{} {
 	return m.params[name]
 }
 
+// wrapWithAuth wraps a SOAP body envelope with WS-UsernameToken digest auth.
+// Used by HTTP-level tests for write operations (Set*, Remove*, etc.) that require auth.
+func wrapWithAuth(soapBody string) string {
+	nonce := "dGVzdA=="
+	created := "2024-01-01T00:00:00.000Z"
+	digest := CheckDigest(nonce, created, "testpass")
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
+          xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"
+          xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd">
+  <s:Header>
+    <wsse:Security>
+      <wsse:UsernameToken>
+        <wsse:Username>admin</wsse:Username>
+        <wsse:Password Type="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest">%s</wsse:Password>
+        <wsse:Nonce>%s</wsse:Nonce>
+        <wsu:Created>%s</wsu:Created>
+      </wsse:UsernameToken>
+    </wsse:Security>
+  </s:Header>
+  <s:Body>
+    %s
+  </s:Body>
+</s:Envelope>`, digest, nonce, created, soapBody)
+}
+
 // newImagingTestServer creates a Server with imaging handlers registered.
 func newImagingTestServer(mock *mockImagingCamera) *Server {
 	cfg := &mockConfig{username: "admin", password: "testpass", port: 8080}
@@ -344,18 +370,12 @@ func TestSetImagingSettingsViaHTTP(t *testing.T) {
 	mock := newMockImagingCamera()
 	srv := newImagingTestServer(mock)
 
-	soapReq := `<?xml version="1.0" encoding="UTF-8"?>
-<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
-            xmlns:timg="http://www.onvif.org/ver20/imaging/wsdl"
-            xmlns:tt="http://www.onvif.org/ver10/schema">
-  <s:Body>
-    <timg:SetImagingSettings>
+	soapBody := `<timg:SetImagingSettings xmlns:timg="http://www.onvif.org/ver20/imaging/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
       <timg:Settings>
         <tt:Brightness tt:Value="0.5"/>
       </timg:Settings>
-    </timg:SetImagingSettings>
-  </s:Body>
-</s:Envelope>`
+    </timg:SetImagingSettings>`
+	soapReq := wrapWithAuth(soapBody)
 
 	req := httptest.NewRequest(http.MethodPost, "/onvif/imaging_service", strings.NewReader(soapReq))
 	req.Header.Set("Content-Type", "application/soap+xml")
@@ -377,18 +397,12 @@ func TestSetImagingSettingsOutOfRangeViaHTTP(t *testing.T) {
 	mock := newMockImagingCamera()
 	srv := newImagingTestServer(mock)
 
-	soapReq := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
-<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
-            xmlns:timg="http://www.onvif.org/ver20/imaging/wsdl"
-            xmlns:tt="http://www.onvif.org/ver10/schema">
-  <s:Body>
-    <timg:SetImagingSettings>
+	soapBody := `<timg:SetImagingSettings xmlns:timg="http://www.onvif.org/ver20/imaging/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
       <timg:Settings>
         <tt:Brightness tt:Value="2.0"/>
       </timg:Settings>
-    </timg:SetImagingSettings>
-  </s:Body>
-</s:Envelope>`)
+    </timg:SetImagingSettings>`
+	soapReq := wrapWithAuth(soapBody)
 
 	req := httptest.NewRequest(http.MethodPost, "/onvif/imaging_service", strings.NewReader(soapReq))
 	req.Header.Set("Content-Type", "application/soap+xml")

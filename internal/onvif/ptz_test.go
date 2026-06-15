@@ -38,10 +38,44 @@ func sendPTZRequest(srv *Server, soapBody string) *httptest.ResponseRecorder {
 	return w
 }
 
+// sendPTZRequestWithAuth sends a SOAP PTZ request with WS-UsernameToken digest auth.
+func sendPTZRequestWithAuth(srv *Server, soapBody string) *httptest.ResponseRecorder {
+	nonce := "dGVzdA=="
+	created := "2024-01-01T00:00:00.000Z"
+	digest := CheckDigest(nonce, created, "testpass")
+
+	soapReq := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
+ xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl"
+ xmlns:tt="http://www.onvif.org/ver10/schema"
+ xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"
+ xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd">
+  <s:Header>
+    <wsse:Security>
+      <wsse:UsernameToken>
+        <wsse:Username>admin</wsse:Username>
+        <wsse:Password Type="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest">%s</wsse:Password>
+        <wsse:Nonce>%s</wsse:Nonce>
+        <wsu:Created>%s</wsu:Created>
+      </wsse:UsernameToken>
+    </wsse:Security>
+  </s:Header>
+  <s:Body>
+    %s
+  </s:Body>
+</s:Envelope>`, digest, nonce, created, soapBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/onvif/ptz_service", strings.NewReader(soapReq))
+	req.Header.Set("Content-Type", "application/soap+xml")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	return w
+}
+
 func TestPTZContinuousMove(t *testing.T) {
 	srv, state := ptzTestServer()
 
-	w := sendPTZRequest(srv, `<tptz:ContinuousMove>
+	w := sendPTZRequestWithAuth(srv, `<tptz:ContinuousMove>
 		<tptz:ProfileToken>main</tptz:ProfileToken>
 		<tptz:Velocity>
 			<tt:PanTilt x="0.5" y="0"/>
@@ -66,7 +100,7 @@ func TestPTZContinuousMove(t *testing.T) {
 func TestPTZContinuousMoveExtractsVelocity(t *testing.T) {
 	srv, state := ptzTestServer()
 
-	w := sendPTZRequest(srv, `<tptz:ContinuousMove>
+	w := sendPTZRequestWithAuth(srv, `<tptz:ContinuousMove>
 		<tptz:ProfileToken>main</tptz:ProfileToken>
 		<tptz:Velocity>
 			<tt:PanTilt x="1.0" y="0.5"/>
@@ -106,7 +140,7 @@ func TestPTZStop(t *testing.T) {
 	}
 
 	// Send Stop via SOAP
-	w := sendPTZRequest(srv, `<tptz:Stop>
+	w := sendPTZRequestWithAuth(srv, `<tptz:Stop>
 		<tptz:ProfileToken>main</tptz:ProfileToken>
 		<tptz:PanTilt>true</tptz:PanTilt>
 		<tptz:Zoom>true</tptz:Zoom>
@@ -126,7 +160,7 @@ func TestPTZStop(t *testing.T) {
 func TestPTZAbsoluteMove(t *testing.T) {
 	srv, state := ptzTestServer()
 
-	w := sendPTZRequest(srv, `<tptz:AbsoluteMove>
+	w := sendPTZRequestWithAuth(srv, `<tptz:AbsoluteMove>
 		<tptz:ProfileToken>main</tptz:ProfileToken>
 		<tptz:Position>
 			<tt:PanTilt x="0.5" y="-0.3"/>
@@ -156,7 +190,7 @@ func TestPTZAbsoluteMove(t *testing.T) {
 func TestPTZRelativeMove(t *testing.T) {
 	srv, state := ptzTestServer()
 
-	w := sendPTZRequest(srv, `<tptz:RelativeMove>
+	w := sendPTZRequestWithAuth(srv, `<tptz:RelativeMove>
 		<tptz:ProfileToken>main</tptz:ProfileToken>
 		<tptz:Translation>
 			<tt:PanTilt x="0.3" y="0.2"/>
@@ -238,7 +272,7 @@ func TestPTZSetPreset(t *testing.T) {
 	state.AbsoluteMove(ptz.Position{Pan: 0.5, Tilt: -0.3, Zoom: 0.8})
 	time.Sleep(2 * time.Second)
 
-	w := sendPTZRequest(srv, `<tptz:SetPreset>
+	w := sendPTZRequestWithAuth(srv, `<tptz:SetPreset>
 		<tptz:ProfileToken>main</tptz:ProfileToken>
 		<tptz:PresetToken>home</tptz:PresetToken>
 	</tptz:SetPreset>`)
@@ -293,7 +327,7 @@ func TestPTZGotoPreset(t *testing.T) {
 	// Store preset at known position
 	state.SetPreset("home", "Home")
 
-	w := sendPTZRequest(srv, `<tptz:GotoPreset>
+	w := sendPTZRequestWithAuth(srv, `<tptz:GotoPreset>
 		<tptz:ProfileToken>main</tptz:ProfileToken>
 		<tptz:PresetToken>home</tptz:PresetToken>
 	</tptz:GotoPreset>`)
@@ -306,7 +340,7 @@ func TestPTZGotoPreset(t *testing.T) {
 func TestPTZGotoPresetNotFound(t *testing.T) {
 	srv, _ := ptzTestServer()
 
-	w := sendPTZRequest(srv, `<tptz:GotoPreset>
+	w := sendPTZRequestWithAuth(srv, `<tptz:GotoPreset>
 		<tptz:ProfileToken>main</tptz:ProfileToken>
 		<tptz:PresetToken>nonexistent</tptz:PresetToken>
 	</tptz:GotoPreset>`)
@@ -322,7 +356,7 @@ func TestPTZRemovePreset(t *testing.T) {
 
 	state.SetPreset("temp", "Temporary")
 
-	w := sendPTZRequest(srv, `<tptz:RemovePreset>
+	w := sendPTZRequestWithAuth(srv, `<tptz:RemovePreset>
 		<tptz:ProfileToken>main</tptz:ProfileToken>
 		<tptz:PresetToken>temp</tptz:PresetToken>
 	</tptz:RemovePreset>`)
@@ -379,7 +413,7 @@ func TestPTZContinuousMoveDefaultZero(t *testing.T) {
 	srv, state := ptzTestServer()
 
 	// ContinuousMove with no velocity elements should not move
-	w := sendPTZRequest(srv, `<tptz:ContinuousMove>
+	w := sendPTZRequestWithAuth(srv, `<tptz:ContinuousMove>
 		<tptz:ProfileToken>main</tptz:ProfileToken>
 		<tptz:Velocity></tptz:Velocity>
 	</tptz:ContinuousMove>`)
@@ -400,7 +434,7 @@ func TestPTZEndToEndSequence(t *testing.T) {
 	srv, state := ptzTestServer()
 
 	// 1. Start continuous move
-	w := sendPTZRequest(srv, `<tptz:ContinuousMove>
+	w := sendPTZRequestWithAuth(srv, `<tptz:ContinuousMove>
 		<tptz:ProfileToken>main</tptz:ProfileToken>
 		<tptz:Velocity>
 			<tt:PanTilt x="1.0" y="0"/>
@@ -425,7 +459,7 @@ func TestPTZEndToEndSequence(t *testing.T) {
 	}
 
 	// 3. Stop
-	w = sendPTZRequest(srv, `<tptz:Stop>
+	w = sendPTZRequestWithAuth(srv, `<tptz:Stop>
 		<tptz:ProfileToken>main</tptz:ProfileToken>
 		<tptz:PanTilt>true</tptz:PanTilt>
 		<tptz:Zoom>true</tptz:Zoom>
@@ -448,7 +482,7 @@ func TestPTZEndToEndSequence(t *testing.T) {
 	}
 
 	// 5. Set preset
-	w = sendPTZRequest(srv, `<tptz:SetPreset>
+	w = sendPTZRequestWithAuth(srv, `<tptz:SetPreset>
 		<tptz:ProfileToken>main</tptz:ProfileToken>
 		<tptz:PresetToken>pos1</tptz:PresetToken>
 	</tptz:SetPreset>`)
@@ -461,7 +495,7 @@ func TestPTZEndToEndSequence(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	// 7. Go to preset
-	w = sendPTZRequest(srv, `<tptz:GotoPreset>
+	w = sendPTZRequestWithAuth(srv, `<tptz:GotoPreset>
 		<tptz:ProfileToken>main</tptz:ProfileToken>
 		<tptz:PresetToken>pos1</tptz:PresetToken>
 	</tptz:GotoPreset>`)
