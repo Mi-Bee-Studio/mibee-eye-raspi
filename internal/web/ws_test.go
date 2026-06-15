@@ -174,7 +174,8 @@ func TestWSHub_Broadcast(t *testing.T) {
 			t.Logf("upgrade failed: %v", err)
 			return
 		}
-		hub.addClient(conn)
+		client := &wsClient{conn: conn}
+		hub.addClient(client)
 		// Keep connection alive by reading in a loop
 		// This goroutine exits when the connection is closed
 		for {
@@ -233,7 +234,8 @@ func TestWSHub_BroadcastMultiple(t *testing.T) {
 		if err != nil {
 			return
 		}
-		hub.addClient(conn)
+		client := &wsClient{conn: conn}
+		hub.addClient(client)
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {
 				return
@@ -295,10 +297,11 @@ func TestWSHub_BroadcastCleanupDisconnected(t *testing.T) {
 		if err != nil {
 			return
 		}
-		hub.addClient(conn)
+		client := &wsClient{conn: conn}
+		hub.addClient(client)
 		// Block until connection dies, then remove client (like wsReadPump)
 		conn.ReadMessage()
-		hub.removeClient(conn)
+		hub.removeClient(client)
 	}))
 	defer server.Close()
 

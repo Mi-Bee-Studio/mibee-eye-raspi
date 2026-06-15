@@ -38,16 +38,32 @@ var upgrader = websocket.Upgrader{
 type wsHub struct {
 	logger  *log.Logger
 	mu      sync.RWMutex
-	clients map[*websocket.Conn]struct{}
+	clients map[*wsClient]struct{}
 	events  chan wsEvent
 	done    chan struct{}
 	closeOnce sync.Once
 }
 
+// wsClient wraps a WebSocket connection with a per-connection write mutex.
+// gorilla/websocket only supports one concurrent writer; this mutex prevents
+// races between hub broadcast, ping writes, and initial state sends.
+type wsClient struct {
+	conn *websocket.Conn
+	mu   sync.Mutex
+}
+
+func (c *wsClient) writeMT(msgType int, data []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
+	return c.conn.WriteMessage(msgType, data)
+}
+
+
 func newWSHub(logger *log.Logger) *wsHub {
 	return &wsHub{
 		logger:  logger,
-		clients: make(map[*websocket.Conn]struct{}),
+		clients: make(map[*wsClient]struct{}),
 		events:  make(chan wsEvent, 64),
 		done:    make(chan struct{}),
 	}
@@ -78,22 +94,22 @@ func (h *wsHub) run(ctx context.Context) {
 
 			// Collect failed connections under read lock, then remove under write lock.
 			h.mu.RLock()
-			var failed []*websocket.Conn
-			for conn := range h.clients {
-				if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
-					failed = append(failed, conn)
+			var failed []*wsClient
+			for client := range h.clients {
+				if err := client.writeMT(websocket.TextMessage, data); err != nil {
+					failed = append(failed, client)
 				}
 			}
 			h.mu.RUnlock()
 
 			if len(failed) > 0 {
 				h.mu.Lock()
-				for _, conn := range failed {
-					if _, still := h.clients[conn]; still {
-						conn.Close()
-						delete(h.clients, conn)
-					}
+			for _, client := range failed {
+				if _, still := h.clients[client]; still {
+					client.conn.Close()
+					delete(h.clients, client)
 				}
+			}
 				h.mu.Unlock()
 			}
 		}
@@ -106,29 +122,27 @@ func (h *wsHub) close() {
 		close(h.done)
 	})
 	h.mu.Lock()
-	for conn := range h.clients {
-		conn.Close()
+	for client := range h.clients {
+		client.conn.Close()
 	}
-	h.clients = make(map[*websocket.Conn]struct{})
+	h.clients = make(map[*wsClient]struct{})
 	h.mu.Unlock()
 }
 
 // addClient registers a new WebSocket connection.
-func (h *wsHub) addClient(conn *websocket.Conn) {
+func (h *wsHub) addClient(client *wsClient) {
 	h.mu.Lock()
-	h.clients[conn] = struct{}{}
+	h.clients[client] = struct{}{}
 	h.mu.Unlock()
 }
 
-// removeClient unregisters a WebSocket connection.
-func (h *wsHub) removeClient(conn *websocket.Conn) {
+func (h *wsHub) removeClient(client *wsClient) {
 	h.mu.Lock()
-	delete(h.clients, conn)
+	delete(h.clients, client)
 	h.mu.Unlock()
-	conn.Close()
+	client.conn.Close()
 }
 
-// handleWS handles WebSocket upgrade requests.
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -136,60 +150,51 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.hub.addClient(conn)
-	go s.wsWritePump(conn)
-	go s.wsReadPump(conn)
+	client := &wsClient{conn: conn}
+	s.hub.addClient(client)
+	go s.wsWritePump(client)
+	go s.wsReadPump(client)
 }
 
-// wsReadPump pumps messages from the WebSocket connection.
-// Client messages are discarded except for pong handling.
-func (s *Server) wsReadPump(conn *websocket.Conn) {
-	defer s.hub.removeClient(conn)
+func (s *Server) wsReadPump(client *wsClient) {
+	defer s.hub.removeClient(client)
 
-	conn.SetReadLimit(wsMaxMsgSize)
-	conn.SetReadDeadline(time.Now().Add(wsPongWait))
-	conn.SetPongHandler(func(string) error {
-		conn.SetReadDeadline(time.Now().Add(wsPongWait))
+	client.conn.SetReadLimit(wsMaxMsgSize)
+	client.conn.SetReadDeadline(time.Now().Add(wsPongWait))
+	client.conn.SetPongHandler(func(string) error {
+		client.conn.SetReadDeadline(time.Now().Add(wsPongWait))
 		return nil
 	})
 
 	for {
-		_, _, err := conn.ReadMessage()
+		_, _, err := client.conn.ReadMessage()
 		if err != nil {
 			break
 		}
-		// Discard all client messages. Pong handling is done by SetPongHandler.
 	}
 }
 
-// wsWritePump sends server pings to keep the connection alive.
-// Actual state-change events are broadcast by the hub's run loop.
-func (s *Server) wsWritePump(conn *websocket.Conn) {
+func (s *Server) wsWritePump(client *wsClient) {
 	ticker := time.NewTicker(wsPingPeriod)
 	defer func() {
 		ticker.Stop()
-		conn.Close()
+		client.conn.Close()
 	}()
 
 	// Send initial state snapshot on connect.
-	s.sendInitialState(conn)
+	s.sendInitialState(client)
 
 	for {
 		select {
 		case <-ticker.C:
-			conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
-			if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"ping"}`)); err != nil {
+			if err := client.writeMT(websocket.TextMessage, []byte(`{"type":"ping"}`)); err != nil {
 				return
 			}
 		}
 	}
 }
 
-// sendInitialState sends the current parameter values, PTZ position, and presets
-// to a newly connected WebSocket client.
-func (s *Server) sendInitialState(conn *websocket.Conn) {
-	conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
-
+func (s *Server) sendInitialState(client *wsClient) {
 	// Send current params.
 	if s.cfg.Params != nil {
 		for name := range camera.ParamRanges {
@@ -199,7 +204,7 @@ func (s *Server) sendInitialState(conn *websocket.Conn) {
 					Name:  name,
 					Value: val,
 				})
-				conn.WriteMessage(websocket.TextMessage, msg)
+				client.writeMT(websocket.TextMessage, msg)
 			}
 		}
 		for name := range camera.ParamEnums {
@@ -209,7 +214,7 @@ func (s *Server) sendInitialState(conn *websocket.Conn) {
 					Name:  name,
 					Value: val,
 				})
-				conn.WriteMessage(websocket.TextMessage, msg)
+				client.writeMT(websocket.TextMessage, msg)
 			}
 		}
 	}
@@ -221,7 +226,7 @@ func (s *Server) sendInitialState(conn *websocket.Conn) {
 			"type":     "ptz-position",
 			"position": pos,
 		})
-		conn.WriteMessage(websocket.TextMessage, msg)
+		client.writeMT(websocket.TextMessage, msg)
 	}
 
 	// Send preset list.
@@ -238,7 +243,7 @@ func (s *Server) sendInitialState(conn *websocket.Conn) {
 				"name":     token,
 				"position": pos,
 			})
-			conn.WriteMessage(websocket.TextMessage, msg)
+			client.writeMT(websocket.TextMessage, msg)
 		}
 	}
 }
