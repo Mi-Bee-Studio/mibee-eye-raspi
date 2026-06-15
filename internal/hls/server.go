@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -66,6 +67,7 @@ type Server struct {
 
 	stopOnce sync.Once
 	wg       sync.WaitGroup // tracks runLoop goroutine
+	watchReadyRunning atomic.Bool // prevents goroutine leak on restart
 }
 
 // New creates a new HLS server. Call Start to begin segmenting.
@@ -236,7 +238,13 @@ func (s *Server) runOnce(ctx context.Context) error {
 	go logStderr(s.logger, stderr)
 
 	// Poll for first segment; signal ready when found.
-	go s.watchReady(ctx)
+	// Only one watchReady goroutine runs at a time to prevent leaks on restart.
+	if !s.watchReadyRunning.Swap(true) {
+		go func() {
+			s.watchReady(ctx)
+			s.watchReadyRunning.Store(false)
+		}()
+	}
 
 	if err := cmd.Wait(); err != nil {
 		// Don't wrap context cancellation as an error.
