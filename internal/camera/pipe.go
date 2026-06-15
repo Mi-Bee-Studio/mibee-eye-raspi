@@ -8,8 +8,15 @@ package camera
 
 import (
 	"encoding/binary"
+	"fmt"
 	"io"
 )
+
+
+// maxFrameSize caps the payload size for a single pipe frame.
+// mtxrpicam video frames are typically < 1MB; 10MB is a generous ceiling
+// that rejects corrupted length prefixes before they cause OOM on the RPi.
+const maxFrameSize = 10 << 20 // 10 MB
 
 // pipe provides binary framed read/write over an io.Reader/io.Writer pair.
 // Wire format: 4-byte little-endian length prefix, followed by payload bytes.
@@ -36,6 +43,9 @@ func (p *pipe) read() ([]byte, error) {
 	le := binary.LittleEndian.Uint32(lenBuf[:])
 	if le == 0 {
 		return nil, nil
+	}
+	if le > maxFrameSize {
+		return nil, fmt.Errorf("pipe frame size %d exceeds maximum %d", le, maxFrameSize)
 	}
 
 	buf := make([]byte, le)

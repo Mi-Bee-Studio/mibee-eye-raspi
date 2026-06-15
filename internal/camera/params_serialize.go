@@ -20,7 +20,9 @@ import (
 
 // Serialize encodes params into the mtxrpicam wire format.
 // Each field is "FieldName:Value", joined by spaces.
-func (p Params) Serialize() []byte {
+// Returns an error if any field has an unsupported type — this prevents
+// a single bad field from crashing the entire camera service.
+func (p Params) Serialize() ([]byte, error) {
 	rv := reflect.ValueOf(p)
 	rt := rv.Type()
 	nf := rv.NumField()
@@ -49,19 +51,23 @@ func (p Params) Serialize() []byte {
 			}
 
 		default:
-			panic(fmt.Sprintf("unhandled param type: %T", v))
+			return nil, fmt.Errorf("unhandled param type for field %s: %T", rt.Field(i).Name, v)
 		}
 
 		ret[i] = entry
 	}
 
-	return []byte(strings.Join(ret, " "))
+	return []byte(strings.Join(ret, " ")), nil
 }
 
 // SerializeCommand returns the full command bytes for sending params to mtxrpicam.
-// Prefix: 'c' + serialized params.
-func (p Params) SerializeCommand() []byte {
-	return append([]byte{'c'}, p.Serialize()...)
+// Prefix: 'c' + serialized params. Returns error if serialization fails.
+func (p Params) SerializeCommand() ([]byte, error) {
+	data, err := p.Serialize()
+	if err != nil {
+		return nil, err
+	}
+	return append([]byte{'c'}, data...), nil
 }
 
 // SerializeQuit returns the quit command bytes.

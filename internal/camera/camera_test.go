@@ -145,7 +145,10 @@ func TestDefaultParams(t *testing.T) {
 
 func TestParamsSerialize(t *testing.T) {
 	p := DefaultParams()
-	serialized := p.Serialize()
+	serialized, err := p.Serialize()
+	if err != nil {
+		t.Fatalf("serialization failed: %v", err)
+	}
 
 	if len(serialized) == 0 {
 		t.Fatal("serialization returned empty")
@@ -173,14 +176,20 @@ func TestParamsSerialize(t *testing.T) {
 
 func TestParamsSerializeCommand(t *testing.T) {
 	p := DefaultParams()
-	cmd := p.SerializeCommand()
+	cmd, err := p.SerializeCommand()
+	if err != nil {
+		t.Fatalf("SerializeCommand failed: %v", err)
+	}
 
 	if len(cmd) == 0 || cmd[0] != 'c' {
 		t.Errorf("expected command to start with 'c', got 0x%.2x", cmd[0])
 	}
 
 	// After 'c', should be the serialized params
-	serialized := p.Serialize()
+	serialized, err := p.Serialize()
+	if err != nil {
+		t.Fatalf("Serialize failed: %v", err)
+	}
 	if !bytes.Equal(cmd[1:], serialized) {
 		t.Error("command body doesn't match serialized params")
 	}
@@ -192,24 +201,32 @@ func TestParamsSerializeStringField(t *testing.T) {
 		AWB:      "auto",
 		Codec:    "hardwareH264",
 	}
-	serialized := string(p.Serialize())
+	serialized, err := p.Serialize()
+	if err != nil {
+		t.Fatalf("serialization failed: %v", err)
+	}
+	s := string(serialized)
 
 	// String values should be base64-encoded
 	normalB64 := base64.StdEncoding.EncodeToString([]byte("normal"))
-	if !strings.Contains(serialized, "Exposure:"+normalB64) {
-		t.Errorf("expected base64-encoded Exposure, got: %s", serialized)
+	if !strings.Contains(s, "Exposure:"+normalB64) {
+		t.Errorf("expected base64-encoded Exposure, got: %s", s)
 	}
 }
 
 func TestParamsSerializeBoolField(t *testing.T) {
 	p := Params{HFlip: true, VFlip: false}
-	serialized := string(p.Serialize())
-
-	if !strings.Contains(serialized, "HFlip:1") {
-		t.Errorf("expected HFlip:1, got: %s", serialized)
+	serialized, err := p.Serialize()
+	if err != nil {
+		t.Fatalf("serialization failed: %v", err)
 	}
-	if !strings.Contains(serialized, "VFlip:0") {
-		t.Errorf("expected VFlip:0, got: %s", serialized)
+	s := string(serialized)
+
+	if !strings.Contains(s, "HFlip:1") {
+		t.Errorf("expected HFlip:1, got: %s", s)
+	}
+	if !strings.Contains(s, "VFlip:0") {
+		t.Errorf("expected VFlip:0, got: %s", s)
 	}
 }
 

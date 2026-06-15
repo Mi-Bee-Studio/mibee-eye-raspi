@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -94,6 +95,9 @@ type RPiCamera struct {
 
 	// binary path
 	binPath string
+
+	// frame drop tracking
+	droppedFrames atomic.Uint64
 }
 
 // RPiCameraOption configures RPiCamera behavior.
@@ -276,6 +280,15 @@ func (c *RPiCamera) spawnSubprocess() error {
 		"PATH=" + os.Getenv("PATH"),
 	}
 
+	// Pass through libcamera-related environment variables so the subprocess
+	// can find IPA tuning files, module paths, etc. Critical for cameras that
+	// need system-installed IPA config (e.g. IMX219 on RPi with bundled libcamera).
+	for _, key := range []string{"LIBCAMERA_IPA_CONFIG_PATH", "LIBCAMERA_IPA_MODULE_PATH", "LIBCAMERA_LOG_LEVELS"} {
+		if v := os.Getenv(key); v != "" {
+			env = append(env, key+"="+v)
+		}
+	}
+
 	c.cmd = exec.CommandContext(c.ctx, binPath)
 	c.cmd.Env = env
 	c.cmd.Dir = binDir
@@ -305,7 +318,12 @@ func (c *RPiCamera) spawnSubprocess() error {
 	c.videoPipe = newPipe(videoReadFile, nil)
 
 	// Send initial config
-	if err := c.confPipe.write(c.params.SerializeCommand()); err != nil {
+	cmd, err := c.params.SerializeCommand()
+	if err != nil {
+		c.cleanupSubprocessLocked()
+		return fmt.Errorf("serialize initial config: %w", err)
+	}
+	if err := c.confPipe.write(cmd); err != nil {
 		// Config send failed — subprocess won't produce frames
 		c.cleanupSubprocessLocked()
 		return fmt.Errorf("send initial config: %w", err)
@@ -403,33 +421,46 @@ func (c *RPiCamera) Frames() <-chan Frame {
 // applied when the next subprocess spawns.
 func (c *RPiCamera) SetParam(name string, value interface{}) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	if !c.started || c.stopped {
+		c.mu.Unlock()
 		return fmt.Errorf("camera not started")
 	}
 
 	paramName, ok := mapParamName(name)
 	if !ok {
+		c.mu.Unlock()
 		return fmt.Errorf("unknown parameter: %s", name)
 	}
 
 	if err := setParamValue(&c.params, paramName, value); err != nil {
+		c.mu.Unlock()
 		return fmt.Errorf("set %s: %w", name, err)
 	}
 
-	// Send updated params to subprocess if currently running
-	if c.confPipe != nil {
-		if err := c.confPipe.write(c.params.SerializeCommand()); err != nil {
-			log.Printf("camera: failed to send param update: %v", err)
-			// Params are saved — will be applied on next restart
-		}
+	cmd, serializeErr := c.params.SerializeCommand()
+	if serializeErr != nil {
+		c.mu.Unlock()
+		return fmt.Errorf("serialize params for %s: %w", name, serializeErr)
 	}
+	confPipe := c.confPipe
 
 	// Update info if resolution/FPS changed
 	c.info.Width = c.params.Width
 	c.info.Height = c.params.Height
 	c.info.FPS = c.params.FPS
+
+	c.mu.Unlock()
+
+	// Write to pipe OUTSIDE the lock to avoid blocking other operations.
+	// If the pipe write fails, the param is saved in memory and will be
+	// applied on the next subprocess restart. Error is propagated to the
+	// caller so they know it may not take effect immediately.
+	if confPipe != nil {
+		if err := confPipe.write(cmd); err != nil {
+			return fmt.Errorf("param %s saved but not applied (subprocess pipe write failed): %w", name, err)
+		}
+	}
 
 	return nil
 }
@@ -452,6 +483,11 @@ func (c *RPiCamera) Info() CameraInfo {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.info
+}
+
+// DroppedFrames returns the count of frames dropped due to slow consumers.
+func (c *RPiCamera) DroppedFrames() uint64 {
+	return c.droppedFrames.Load()
 }
 
 // readLoop reads frames from the video pipe and sends them to the frames channel.
@@ -520,6 +556,7 @@ func (c *RPiCamera) readLoop() {
 			select {
 			case framesCh <- frame:
 			default:
+				c.droppedFrames.Add(1)
 				// Frame dropped — consumer too slow
 			}
 
