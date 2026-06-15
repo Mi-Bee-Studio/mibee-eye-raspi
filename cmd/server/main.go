@@ -143,11 +143,25 @@ adapter := &configAdapter{cfg: cfg, deviceIP: localIP}
 		Codec:        "H264",
 	}
 
-	cam := camera.NewRPiCamera(
-		camera.WithBinPath("deploy/bin/mtxrpicam"),
-		camera.WithParams(cameraParams),
-		camera.WithInfo(cameraInfo),
-	)
+	// Determine the external RTSP URL for HLS consumption.
+	// When camera mode=rtsp, the stream comes from MediaMTX and we point
+	// GetStreamUri/HLS/RTMP at MediaMTX's RTSP URL instead of our own server.
+	externalRTSPURL := ""
+	var cam camera.Camera
+	if cfg.Camera.Mode == "rtsp" {
+		externalRTSPURL = cfg.Camera.RTSPURL
+		if externalRTSPURL == "" {
+			externalRTSPURL = fmt.Sprintf("rtsp://127.0.0.1:%d/stream", cfg.RTSP.Port)
+		}
+		log.Printf("camera: using external RTSP source: %s", externalRTSPURL)
+		cam = camera.NewRTSPSource(externalRTSPURL, cameraParams, cameraInfo)
+	} else {
+		cam = camera.NewRPiCamera(
+			camera.WithBinPath("deploy/bin/mtxrpicam"),
+			camera.WithParams(cameraParams),
+			camera.WithInfo(cameraInfo),
+		)
+	}
 
 	if err := cam.Start(ctx); err != nil {
 		log.Fatalf("camera start: %v", err)
@@ -189,23 +203,31 @@ adapter := &configAdapter{cfg: cfg, deviceIP: localIP}
 		}
 	}()
 
-	// --- Step 3: RTSP Server ---
-	rtspSub := auHub.Subscribe(ctx)
-	rtspServer := rtsp.New(rtsp.Config{
-		Port:     cfg.RTSP.Port,
-		Username: cfg.RTSP.Username,
-		Password: cfg.RTSP.Password,
-		Address:  localIP,
-	})
-	rtspServer.SetFrameSource(rtspSub.Channel)
+	// --- Step 3: RTSP Server (skipped when consuming external RTSP) ---
+	var rtspServer *rtsp.Server
+	// rtspURLForConsumers is what HLS/RTMP should connect to.
+	// When mode=rtsp, they connect to the external source directly.
+	rtspURLForConsumers := fmt.Sprintf("rtsp://127.0.0.1:%d/stream", cfg.RTSP.Port)
+	if externalRTSPURL != "" {
+		rtspURLForConsumers = externalRTSPURL
+	} else {
+		rtspSub := auHub.Subscribe(ctx)
+		rtspServer = rtsp.New(rtsp.Config{
+			Port:     cfg.RTSP.Port,
+			Username: cfg.RTSP.Username,
+			Password: cfg.RTSP.Password,
+			Address:  localIP,
+		})
+		rtspServer.SetFrameSource(rtspSub.Channel)
 
-	if err := rtspServer.Start(ctx); err != nil {
-		log.Fatalf("rtsp server start: %v", err)
+		if err := rtspServer.Start(ctx); err != nil {
+			log.Fatalf("rtsp server start: %v", err)
+		}
 	}
 
 	// --- Step 3.5: HLS Bridge (ffmpeg RTSP -> HLS for browser playback) ---
 	hlsServer := hls.New(hls.Config{
-		RTSPURL:      fmt.Sprintf("rtsp://127.0.0.1:%d/stream", cfg.RTSP.Port),
+		RTSPURL:      rtspURLForConsumers,
 		OutputDir:    "/tmp/hls-mibee-eye",
 		SegmentTime:  1,
 		ListSize:     6,
@@ -216,6 +238,7 @@ adapter := &configAdapter{cfg: cfg, deviceIP: localIP}
 	if err := hlsServer.Start(ctx); err != nil {
 		log.Printf("warning: HLS bridge not started (web preview disabled): %v", err)
 	}
+
 
 	// --- Step 4: ParamManager + PTZ ---
 	paramManager := camera.NewParamManager(cam)
@@ -285,7 +308,7 @@ adapter := &configAdapter{cfg: cfg, deviceIP: localIP}
 		rtmpPush = rtmp.New(rtmp.Config{
 			Enabled: true,
 			URL:     cfg.RTMP.URL,
-			RTSPURL: fmt.Sprintf("rtsp://localhost:%d/stream", cfg.RTSP.Port),
+			RTSPURL: rtspURLForConsumers,
 		})
 		rtmpPush.Start(ctx)
 	}
@@ -309,7 +332,12 @@ adapter := &configAdapter{cfg: cfg, deviceIP: localIP}
 		return nil
 	})
 	shutdownStep("hls", 5*time.Second, func() error { return hlsServer.Stop() })
-	shutdownStep("rtsp", 5*time.Second, func() error { return rtspServer.Stop() })
+	shutdownStep("rtsp", 5*time.Second, func() error {
+		if rtspServer != nil {
+			return rtspServer.Stop()
+		}
+		return nil
+	})
 	shutdownStep("camera", 5*time.Second, func() error { return cam.Stop() })
 
 	log.Printf("MiBee Eye %s stopped", version)
