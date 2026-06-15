@@ -26,6 +26,7 @@ type Velocity struct {
 
 // Preset stores a named PTZ position.
 type Preset struct {
+	Token    string
 	Name     string
 	Position Position
 }
@@ -259,10 +260,15 @@ func (s *State) GetStatus() string {
 // SetPreset stores current position as a named preset.
 func (s *State) SetPreset(token string, presetName string) error {
 	s.mu.Lock()
-	s.presets[token] = Preset{
+	preset := Preset{
+		Token:    token,
 		Name:     presetName,
 		Position: s.position,
 	}
+	if s.presets == nil {
+		s.presets = make(map[string]Preset)
+	}
+	s.presets[token] = preset
 	cb := s.onPresetChange
 	s.mu.Unlock()
 
@@ -333,7 +339,8 @@ func (s *State) ListPresets() []Preset {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]Preset, 0, len(s.presets))
-	for _, p := range s.presets {
+	for token, p := range s.presets {
+		p.Token = token
 		out = append(out, p)
 	}
 	return out

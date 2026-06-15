@@ -359,12 +359,11 @@ func (s *Server) handleGetPTZPresets(w http.ResponseWriter, r *http.Request) {
 	result := make([]map[string]interface{}, 0, len(presets))
 	for _, p := range presets {
 		result = append(result, map[string]interface{}{
-			"token":    "",
+			"token":    p.Token,
 			"name":     p.Name,
 			"position": p.Position,
 		})
 	}
-
 	writeJSON(w, http.StatusOK, result)
 }
 
