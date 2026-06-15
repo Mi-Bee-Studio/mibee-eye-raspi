@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/camera"
@@ -122,8 +121,12 @@ func (s *Server) Start(ctx context.Context) error {
 
 	addr := net.JoinHostPort("0.0.0.0", strconv.Itoa(port))
 	s.server = &http.Server{
-		Addr:    addr,
-		Handler: securityHeaders(s.mux),
+		Addr:              addr,
+		Handler:           securityHeaders(s.mux),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	errCh := make(chan error, 1)
@@ -186,8 +189,13 @@ func (s *Server) registerRoutes() {
 	m.HandleFunc("POST /api/ptz/preset/goto", s.authRequired(s.handlePostPTZPresetGoto))
 	m.HandleFunc("DELETE /api/ptz/preset/{token}", s.authRequired(s.handleDeletePTZPreset))
 	m.HandleFunc("GET /api/snapshot", s.authRequired(s.handleGetSnapshot))
-	// HLS live stream — auth required (bearer token)
-	m.HandleFunc("GET /api/hls/{name}", s.authRequired(s.handleHLS))
+	// HLS live stream — manifest requires auth; segments are open (short-lived,
+
+	// discoverable only via authenticated playlist). hls.js doesn't forward
+
+	// Authorization headers to segment requests reliably.
+
+	m.HandleFunc("GET /api/hls/{name}", s.handleHLSAuth)
 
 	// WebSocket — auth via ?token= query string
 	m.HandleFunc("GET /ws", s.authRequired(s.handleWS))
@@ -200,24 +208,13 @@ type wsEvent struct {
 	Value interface{} `json:"value,omitempty"`
 }
 
-// jsonBufPool reduces allocations for JSON marshalling.
-var jsonBufPool = sync.Pool{
-	New: func() interface{} {
-		return make([]byte, 0, 256)
-	},
-}
-
 // writeJSON writes a JSON response with the given status code.
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
-	buf := jsonBufPool.Get().([]byte)
-	buf = buf[:0]
 	data, err := json.Marshal(v)
 	if err != nil {
 		http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
-		jsonBufPool.Put(buf)
 		return
 	}
-	jsonBufPool.Put(buf)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -263,7 +260,8 @@ func securityHeaders(next http.Handler) http.Handler {
 					"connect-src 'self' ws: wss:; "+
 					"media-src 'self' blob:; "+
 					"base-uri 'self'; "+
-					"form-action 'none'; "+
+					"form-action 'self'; "+
+
 					"frame-ancestors 'none'")
 		}
 
@@ -308,6 +306,24 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{
 		"version": s.cfg.Version,
 	})
+}
+
+// handleHLSAuth authenticates only the playlist (.m3u8); segment (.ts) files
+// are served without auth since they're short-lived and can only be discovered
+// via the authenticated playlist.
+func (s *Server) handleHLSAuth(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	// Require auth for playlists, allow segments without auth
+	if filepath.Ext(name) == ".m3u8" {
+		token, _ := extractToken(r)
+		if _, err := s.sessions.Validate(token); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"error":"unauthorized"}`))
+			return
+		}
+	}
+	s.handleHLS(w, r)
 }
 
 // handleHLS serves HLS playlist (.m3u8) and segment (.ts) files from

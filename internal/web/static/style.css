@@ -716,7 +716,7 @@ body.sidebar-collapsed .sidebar {
 }
 
 .snapshot-img {
-display: none;
+display: block;
 width: 100%;
 height: 100%;
 object-fit: contain;
@@ -728,7 +728,7 @@ animation: fadeIn var(--t) var(--ease);
     height: 100%;
     object-fit: contain;
     background: #000;
-    display: none;
+    display: block;
 }
 
 .snapshot-placeholder {

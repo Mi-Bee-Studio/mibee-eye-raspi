@@ -1016,7 +1016,7 @@
             var hls = new Hls({
                 liveSyncDurationCount: 3,
                 liveMaxLatencyDurationCount: 6,
-                enableWorker: true,
+                enableWorker: false,
                 lowLatencyMode: false,
                 xhrSetup: function(xhr) {
                     if (state.token) {
@@ -1041,6 +1041,16 @@
                     fallbackToSnapshot();
                 }
             });
+            
+            // Fallback timeout: if HLS hasn't started playing in 8s, use snapshot
+            setTimeout(function() {
+                if (!state.videoPlaying) {
+                    fallbackToSnapshot();
+                }
+            }, 8000);
+            
+            // Start snapshot polling immediately as a preview while HLS loads
+            refreshSnapshot();
             return true;
         }
 
@@ -1526,6 +1536,7 @@
             clearInterval(state.metaTimer);
             state.metaTimer = null;
         }
+    }
 
     function scheduleReconnect() {
         clearTimeout(state.wsReconnectTimer);
