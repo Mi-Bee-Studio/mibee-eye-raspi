@@ -96,7 +96,8 @@ func (p *Push) Stop() error {
 	}
 
 	if cmd != nil && cmd.Process != nil {
-		cmd.Process.Kill()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait() // REAP the zombie — prevents defunct child process
 	}
 
 	p.mu.Lock()
