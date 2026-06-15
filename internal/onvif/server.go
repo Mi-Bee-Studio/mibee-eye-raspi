@@ -1,15 +1,16 @@
 package onvif
 
 import (
-"bytes"
-"context"
-"encoding/xml"
-"fmt"
-"io"
+	"bytes"
+	"context"
+	"encoding/xml"
+	"fmt"
+	"io"
 	"log"
 	"net"
-"net/http"
-"strings"
+	"net/http"
+	"strings"
+	"time"
 )
 
 // ActionHandler handles a specific ONVIF SOAP action.
@@ -100,34 +101,35 @@ func parseSOAPRequest(data []byte) (action string, bodyContent []byte, err error
 }
 
 // parseAndAuth parses a SOAP request, authenticates, and extracts the action name.
-func (s *Server) parseAndAuth(r *http.Request) (action string, bodyContent []byte, err error) {
-	data, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1MB limit
-	if err != nil {
-		return "", nil, fmt.Errorf("reading request body: %w", err)
-	}
-
+// Unlike the old version, it accepts pre-read data bytes and returns the authResult
+// explicitly — the caller decides whether auth is required for the action.
+// Auth failures do NOT return an error; the authResult indicates success/failure.
+func (s *Server) parseAndAuth(data []byte) (action string, bodyContent []byte, authResult *AuthResult, err error) {
 	var envelope SOAPEnvelope
 	if err := xml.Unmarshal(data, &envelope); err != nil {
-		return "", nil, fmt.Errorf("parsing SOAP envelope: %w", err)
+		return "", nil, &AuthResult{}, fmt.Errorf("parsing SOAP envelope: %w", err)
 	}
 
-	// Authenticate
-	authResult := &AuthResult{}
+	// Authenticate if credentials are provided
+	authResult = &AuthResult{}
 	if envelope.Header.Security != nil && envelope.Header.Security.UsernameToken != nil {
-		if authErr := s.auth.Validate(envelope.Header.Security.UsernameToken); authErr != nil {
-			return "", nil, fmt.Errorf("authentication failed: %w", authErr)
+		token := envelope.Header.Security.UsernameToken
+		authResult.Username = token.Username
+		if authErr := s.auth.Validate(token); authErr != nil {
+			authResult.OK = false // credentials provided but invalid
+		} else {
+			authResult.OK = true // valid credentials
 		}
-		authResult.Username = envelope.Header.Security.UsernameToken.Username
-		authResult.OK = true
 	}
+	// If no credentials provided, authResult.OK stays false
 
 	// Extract action from body
 	action, bodyContent, err = parseSOAPRequest(data)
 	if err != nil {
-		return "", nil, err
+		return "", nil, authResult, err
 	}
 
-	return action, bodyContent, nil
+	return action, bodyContent, authResult, nil
 }
 
 // writeSOAPResponse wraps response data in a SOAP envelope and writes it.
@@ -150,10 +152,10 @@ func writeSOAPResponse(w http.ResponseWriter, data interface{}) error {
 	return nil
 }
 
-// writeSOAPFault returns a SOAP 1.2 fault response.
-func writeSOAPFault(w http.ResponseWriter, code, reason string) error {
+// writeSOAPFault returns a SOAP 1.2 fault response with the given HTTP status code.
+func writeSOAPFault(w http.ResponseWriter, faultCode, reason string, httpStatus int) error {
 	fault := SOAPFault{
-		Code: SOAPFaultCode{Value: code},
+		Code: SOAPFaultCode{Value: faultCode},
 		Reason: SOAPFaultReason{Text: reason},
 	}
 	env := soapFaultEnvelope{
@@ -167,11 +169,26 @@ func writeSOAPFault(w http.ResponseWriter, code, reason string) error {
 	}
 
 	w.Header().Set("Content-Type", "application/soap+xml; charset=utf-8")
-	w.WriteHeader(http.StatusInternalServerError)
+	w.WriteHeader(httpStatus)
 	if _, err := w.Write(output); err != nil {
 		return fmt.Errorf("writing fault response: %w", err)
 	}
 	return nil
+}
+
+// isAuthRequired returns true if the ONVIF action requires authentication.
+// Write operations (Set, Remove, Create, Go prefix, plus explicit PTZ moves and Stop)
+// require valid WS-UsernameToken credentials. Read operations are open.
+func isAuthRequired(action string) bool {
+	switch action {
+	case "ContinuousMove", "AbsoluteMove", "RelativeMove", "Stop":
+		return true
+	}
+	if strings.HasPrefix(action, "Set") || strings.HasPrefix(action, "Remove") ||
+		strings.HasPrefix(action, "Create") || strings.HasPrefix(action, "Go") {
+		return true
+	}
+	return false
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -182,55 +199,51 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method != http.MethodPost {
-		writeSOAPFault(w, "soap:Sender", fmt.Sprintf("unsupported method: %s", r.Method))
+		writeSOAPFault(w, "soap:Sender", fmt.Sprintf("unsupported method: %s", r.Method), http.StatusInternalServerError)
 		return
 	}
 
 	// Read body once for both discovery check and SOAP processing
 	data, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
-		writeSOAPFault(w, "soap:Sender", "failed to read request body")
+		writeSOAPFault(w, "soap:Sender", "failed to read request body", http.StatusBadRequest)
 		return
 	}
 	r.Body = io.NopCloser(bytes.NewReader(data))
 
-	// The server-side local IP is already in r.Context() (set by ConnContext in
-	// Start). It is the RPi interface IP that accepted this connection — the
-	// IP the NVR must use to reach us back. Handlers read it via
-	// ServerIPFromContext; we just use r.Context() here.
-	ctx := r.Context()
-
-	// WS-Discovery probe interception — check before regular SOAP action routing
-	if s.discoveryHandler != nil && bytes.Contains(data, []byte("Probe")) && bytes.Contains(data, []byte("discovery")) {
-		s.discoveryHandler.ServeHTTP(w, r.WithContext(ctx))
+	// Parse SOAP and authenticate
+	action, bodyContent, authResult, err := s.parseAndAuth(data)
+	if err != nil {
+		writeSOAPFault(w, "soap:Client", err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	// Continue with regular SOAP processing
-	action, bodyContent, err := s.parseAndAuth(r)
-	if err != nil {
-		if strings.Contains(err.Error(), "authentication failed") {
-			writeSOAPFault(w, "soap:Client", err.Error())
-		} else {
-			writeSOAPFault(w, "soap:Client", err.Error())
-		}
+	// WS-Discovery probe interception — check action name after SOAP parsing
+	if s.discoveryHandler != nil && action == "Probe" {
+		s.discoveryHandler.ServeHTTP(w, r)
 		return
 	}
 
 	if action == "" {
-		writeSOAPFault(w, "soap:Client", "no action found in SOAP body")
+		writeSOAPFault(w, "soap:Client", "no action found in SOAP body", http.StatusBadRequest)
 		return
 	}
 
 	handler, ok := s.actions[action]
 	if !ok {
-		writeSOAPFault(w, "soap:Sender", fmt.Sprintf("unsupported action: %s", action))
+		writeSOAPFault(w, "soap:Sender", fmt.Sprintf("unsupported action: %s", action), http.StatusBadRequest)
 		return
 	}
 
-	result, err := handler(ctx, bodyContent, &AuthResult{OK: true})
+	// Auth check: write operations require valid credentials
+	if isAuthRequired(action) && !authResult.OK {
+		writeSOAPFault(w, "soap:Sender", fmt.Sprintf("authentication required for action: %s", action), http.StatusUnauthorized)
+		return
+	}
+
+	result, err := handler(r.Context(), bodyContent, authResult)
 	if err != nil {
-		writeSOAPFault(w, "soap:Receiver", err.Error())
+		writeSOAPFault(w, "soap:Receiver", err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -243,8 +256,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) Start(ctx context.Context) error {
 	addr := fmt.Sprintf(":%d", s.config.ONVIFPort())
 	s.httpServer = &http.Server{
-		Addr:    addr,
-		Handler: s,
+		Addr:              addr,
+		Handler:           s,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 		// ConnContext fires for every accepted connection. We use it to
 		// capture the local IP of the RPi interface that accepted the
 		// connection — this is what the NVR needs in XAddr/RTSP URIs to

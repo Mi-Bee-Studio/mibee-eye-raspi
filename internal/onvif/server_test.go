@@ -227,13 +227,16 @@ func TestParseSOAPWithAuth(t *testing.T) {
 	cfg := &mockConfig{username: "admin", password: "testpass", port: 8080}
 	srv := New(cfg)
 
-	req := httptest.NewRequest(http.MethodPost, "/onvif/device_service", strings.NewReader(soapReq))
-	req.Header.Set("Content-Type", "application/soap+xml")
-	_ = httptest.NewRecorder()
-
-	action, bodyContent, err := srv.parseAndAuth(req)
+	data := []byte(soapReq)
+	action, bodyContent, authResult, err := srv.parseAndAuth(data)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if !authResult.OK {
+		t.Fatalf("expected auth OK, got false")
+	}
+	if authResult.Username != "admin" {
+		t.Fatalf("expected username admin, got %s", authResult.Username)
 	}
 	if action != "GetDeviceInformation" {
 		t.Fatalf("expected GetDeviceInformation, got %s", action)
@@ -241,7 +244,11 @@ func TestParseSOAPWithAuth(t *testing.T) {
 	if bodyContent == nil {
 		t.Fatal("expected non-nil body content")
 	}
+	if !strings.Contains(string(bodyContent), "GetDeviceInformation") {
+		t.Fatalf("body content missing action element: %s", string(bodyContent))
+	}
 }
+
 
 func TestParseInvalidXML(t *testing.T) {
 	_, _, err := parseSOAPRequest([]byte("not xml at all <><<<"))
@@ -271,7 +278,7 @@ func TestParseEmptyBody(t *testing.T) {
 
 func TestWriteSOAPFault(t *testing.T) {
 	w := httptest.NewRecorder()
-	err := writeSOAPFault(w, "soap:Sender", "test error")
+	err := writeSOAPFault(w, "soap:Sender", "test error", http.StatusInternalServerError)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -347,8 +354,8 @@ func TestServeHTTPUnknownAction(t *testing.T) {
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
-	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500 for unknown action, got %d", w.Code)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unknown action, got %d", w.Code)
 	}
 }
 

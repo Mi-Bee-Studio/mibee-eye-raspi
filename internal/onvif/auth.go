@@ -2,6 +2,7 @@ package onvif
 
 import (
 	"crypto/sha1"
+	"crypto/subtle"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -38,21 +39,21 @@ func (a *Auth) Validate(token *UsernameToken) error {
 	if token.Username == "" {
 		return ErrEmptyUsername
 	}
-	if token.Username != a.Username {
+	if subtle.ConstantTimeCompare([]byte(token.Username), []byte(a.Username)) != 1 {
 		return fmt.Errorf("%w: username mismatch", ErrPasswordMismatch)
 	}
 
 	if token.Nonce != "" {
 		// Digest mode: compare computed digest with provided password
 		expected := CheckDigest(token.Nonce, token.Created, a.Password)
-		if token.Password != expected {
+		if subtle.ConstantTimeCompare([]byte(token.Password), []byte(expected)) != 1 {
 			return ErrPasswordMismatch
 		}
 		return nil
 	}
 
 	// PasswordText mode: direct comparison
-	if token.Password != a.Password {
+	if subtle.ConstantTimeCompare([]byte(token.Password), []byte(a.Password)) != 1 {
 		return ErrPasswordMismatch
 	}
 	return nil
