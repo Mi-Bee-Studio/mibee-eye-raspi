@@ -4,6 +4,7 @@ package rtsp
 import (
 	"context"
 	"fmt"
+	"log"
 	"net"
 	"sync"
 	"time"
@@ -83,7 +84,7 @@ func (s *Server) Start(ctx context.Context) error {
 	go func() {
 		err := s.rtspServer.StartAndWait()
 		if err != nil {
-			fmt.Printf("rtsp server error: %v\n", err)
+			log.Printf("rtsp server error: %v", err)
 		}
 	}()
 
@@ -240,7 +241,7 @@ func (s *Server) initStream() {
 		Desc:   desc,
 	}
 	if err := s.stream.Initialize(); err != nil {
-		fmt.Printf("rtsp: failed to initialize stream: %v\n", err)
+		log.Printf("rtsp: failed to initialize stream: %v", err)
 		s.stream = nil
 		return
 	}
@@ -249,7 +250,7 @@ func (s *Server) initStream() {
 	if s.rtpEncoder == nil {
 		enc, err := s.h264Format.CreateEncoder()
 		if err != nil {
-			fmt.Printf("rtsp: failed to create RTP encoder: %v\n", err)
+			log.Printf("rtsp: failed to create RTP encoder: %v", err)
 			return
 		}
 		s.rtpEncoder = enc
@@ -351,7 +352,7 @@ func (s *Server) processAccessUnit(au h264.AccessUnit) {
 	// Encode into RTP packets
 	pkts, err := encoder.Encode(nalus)
 	if err != nil {
-		fmt.Printf("rtsp: RTP encode error: %v\n", err)
+		log.Printf("rtsp: RTP encode error: %v", err)
 		return
 	}
 
@@ -383,8 +384,6 @@ func (s *Server) updateFormat(nalus []h264.NALU) {
 	}
 
 	if sps != nil && pps != nil {
-		s.h264Format.SPS = sps
-		s.h264Format.PPS = pps
 		s.h264Format.SPS = sps
 		s.h264Format.PPS = pps
 
