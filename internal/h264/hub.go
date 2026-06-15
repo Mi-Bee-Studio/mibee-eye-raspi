@@ -60,7 +60,7 @@ func (h *AUHub) Subscribe(ctx context.Context) *Subscriber {
 
 	sub := &Subscriber{
 		ID:      id,
-		Channel: make(chan AccessUnit, 16),
+		Channel: make(chan AccessUnit, 64),
 		cancel:  cancel,
 	}
 	h.subscribers[id] = sub
