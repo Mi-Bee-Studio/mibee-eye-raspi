@@ -123,8 +123,6 @@ type VideoSource struct {
 
 // RegisterMediaHandlers registers all Media service handlers on the ONVIF server.
 // It reads camera and RTSP configuration from the server's ConfigProvider.
-// RegisterMediaHandlers registers all Media service handlers on the ONVIF server.
-// It reads camera and RTSP configuration from the server's ConfigProvider.
 // The RTSP URL returned by GetStreamUri reflects the IP address the NVR used
 // to reach this device — the per-request client IP — so the URL is reachable
 // from the NVR regardless of which interface was used.
