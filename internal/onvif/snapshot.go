@@ -14,6 +14,11 @@ import (
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/h264"
 )
 
+// snapshotSem limits concurrent FFmpeg snapshot conversions to prevent OOM
+// on memory-constrained devices like RPi 3B (905MB RAM).
+var snapshotSem = make(chan struct{}, 2)
+
+
 // GetSnapshotUriResponse is the ONVIF GetSnapshotUri SOAP response.
 type GetSnapshotUriResponse struct {
 	XMLName  xml.Name `xml:"trt:GetSnapshotUriResponse"`
@@ -168,18 +173,27 @@ const snapshotTimeout = 5 * time.Second
 // handleSnapshotHTTPWithBin is like handleSnapshotHTTP but accepts a custom
 // ffmpeg binary path, used in tests to inject a mock converter.
 func handleSnapshotHTTPWithBin(w http.ResponseWriter, r *http.Request, buf *SnapshotBuffer, ffmpegBin string) {
-	jpegData, err := ConvertIDRToJPEG(r.Context(), buf.Latest(), ffmpegBin)
-	if err != nil {
-		switch {
-		case buf.Latest() == nil:
-			http.Error(w, "snapshot not available: no frame received yet", http.StatusServiceUnavailable)
-		default:
-			http.Error(w, err.Error(), http.StatusServiceUnavailable)
-		}
+	au := buf.Latest()
+	if au == nil {
+		http.Error(w, "snapshot not available: no frame received yet", http.StatusServiceUnavailable)
 		return
 	}
 
-	au := buf.Latest()
+	// Limit concurrent FFmpeg conversions to prevent OOM on memory-constrained devices.
+	select {
+	case snapshotSem <- struct{}{}:
+		defer func() { <-snapshotSem }()
+	case <-time.After(3 * time.Second):
+		http.Error(w, "snapshot server busy, try again later", http.StatusServiceUnavailable)
+		return
+	}
+
+	jpegData, err := ConvertIDRToJPEG(r.Context(), au, ffmpegBin)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+
 	w.Header().Set("Content-Type", "image/jpeg")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(jpegData)))
 	w.Header().Set("X-Frame-Timestamp", au.Timestamp.UTC().Format(time.RFC3339Nano))

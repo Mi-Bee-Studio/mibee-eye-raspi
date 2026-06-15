@@ -462,3 +462,58 @@ func TestGetSnapshotUriRawSOAP(t *testing.T) {
 	}
 }
 
+
+// ---------------------------------------------------------------------------
+// TOCTOU + concurrency limit tests
+// ---------------------------------------------------------------------------
+
+func TestSnapshotUsesConsistentFrame(t *testing.T) {
+	buf := NewSnapshotBuffer()
+	ts := time.Date(2024, 6, 15, 14, 30, 0, 0, time.UTC)
+	buf.Feed(h264.AccessUnit{
+		NALUs:     []h264.NALU{{Type: 5, Data: []byte("test-frame-data"), IsIDR: true}},
+		Timestamp: ts,
+		KeyFrame:  true,
+	})
+	mockFFmpeg := writeMockFFmpeg(t, "mock-ffmpeg-consistent", false)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, "/snapshot", nil).WithContext(ctx)
+	w := httptest.NewRecorder()
+	handleSnapshotHTTPWithBin(w, req, buf, mockFFmpeg)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	wantTS := "2024-06-15T14:30:00Z"
+	gotTS := w.Header().Get("X-Frame-Timestamp")
+	if gotTS != wantTS {
+		t.Errorf("expected timestamp %q, got %q", wantTS, gotTS)
+	}
+}
+
+func TestSnapshotConcurrencyLimit(t *testing.T) {
+	buf := NewSnapshotBuffer()
+	buf.Feed(h264.AccessUnit{
+		NALUs:     []h264.NALU{{Type: 5, Data: []byte("test-frame"), IsIDR: true}},
+		Timestamp: time.Now(),
+		KeyFrame:  true,
+	})
+	mockFFmpeg := writeMockFFmpeg(t, "mock-ffmpeg-concurrency", false)
+
+	// Fill semaphore to capacity so new requests must wait.
+	snapshotSem <- struct{}{}
+	snapshotSem <- struct{}{}
+	defer func() { <-snapshotSem; <-snapshotSem }()
+
+	req := httptest.NewRequest(http.MethodGet, "/snapshot", nil)
+	w := httptest.NewRecorder()
+	handleSnapshotHTTPWithBin(w, req, buf, mockFFmpeg)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 when semaphore full, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "busy") {
+		t.Errorf("expected 'busy' in response body, got %q", w.Body.String())
+	}
+}
