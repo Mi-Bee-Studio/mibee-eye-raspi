@@ -7,17 +7,14 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/camera"
-	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/hls"
-	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/onvif"
+	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/h264"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/ptz"
 )
-
 // OnvifConfigProvider provides read-only access to ONVIF, RTSP, device, and camera configuration.
 type OnvifConfigProvider interface {
 	ONVIFPort() int
@@ -38,8 +35,6 @@ type OnvifConfigProvider interface {
 	DeviceHardwareID() string
 	DeviceSerialNumber() string
 	LoggingLevel() string
-	RTMPEnabled() bool
-	RTMPURL() string
 }
 
 // Config holds the web server configuration.
@@ -51,8 +46,7 @@ type Config struct {
 	OnvifConfig OnvifConfigProvider // read-only onvif/rtsp config
 	Params      *camera.ParamManager
 	PTZ         *ptz.State
-	Snapshot    *onvif.SnapshotBuffer
-	HLS         *hls.Server // optional HLS bridge; nil disables /api/hls/*
+	AUHub       *h264.AUHub
 	Version     string              // build version from ldflags
 	Logger      *log.Logger // nil -> log.Default()
 }
@@ -180,7 +174,6 @@ func (s *Server) registerRoutes() {
 	m.HandleFunc("GET /{$}", s.handleIndex)
 	m.HandleFunc("GET /static/style.css", s.handleStaticFile("static/style.css", "text/css"))
 	m.HandleFunc("GET /static/app.js", s.handleStaticFile("static/app.js", "application/javascript"))
-	m.HandleFunc("GET /static/hls.min.js", s.handleStaticFile("static/hls.min.js", "application/javascript"))
 	m.HandleFunc("GET /health", s.handleHealth)
 	m.HandleFunc("GET /api/version", s.handleVersion)
 
@@ -204,17 +197,13 @@ func (s *Server) registerRoutes() {
 	m.HandleFunc("POST /api/ptz/preset/goto", s.authRequired(s.handlePostPTZPresetGoto))
 	m.HandleFunc("DELETE /api/ptz/preset/{token}", s.authRequired(s.handleDeletePTZPreset))
 	m.HandleFunc("PUT /api/ptz/preset/{token}", s.authRequired(s.handlePutPTZPreset))
-	m.HandleFunc("GET /api/snapshot", s.authRequired(s.handleGetSnapshot))
-	// HLS live stream — manifest requires auth; segments are open (short-lived,
-
-	// discoverable only via authenticated playlist). hls.js doesn't forward
-
-	// Authorization headers to segment requests reliably.
-
-	m.HandleFunc("GET /api/hls/{name}", s.handleHLSAuth)
 
 	// WebSocket — auth via ?token= query string
 	m.HandleFunc("GET /ws", s.authRequired(s.handleWS))
+
+	// H.264 video stream via WebSocket — auth via ?token= query string
+	m.HandleFunc("GET /api/stream/ws", s.authRequired(s.handleStreamWS))
+
 }
 
 // wsEvent represents a WebSocket event to broadcast.
@@ -322,50 +311,6 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{
 		"version": s.cfg.Version,
 	})
-}
-
-// handleHLSAuth authenticates only the playlist (.m3u8); segment (.ts) files
-// are served without auth since they're short-lived and can only be discovered
-// via the authenticated playlist.
-func (s *Server) handleHLSAuth(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
-	// Require auth for playlists, allow segments without auth
-	if filepath.Ext(name) == ".m3u8" {
-		token, _ := extractToken(r)
-		if _, err := s.sessions.Validate(token); err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			w.Write([]byte(`{"error":"unauthorized"}`))
-			return
-		}
-	}
-	s.handleHLS(w, r)
-}
-
-// handleHLS serves HLS playlist (.m3u8) and segment (.ts) files from
-// the HLS server's output directory. Path traversal is prevented by
-// validation + filepath.Join cleaning.
-func (s *Server) handleHLS(w http.ResponseWriter, r *http.Request) {
-	if s.cfg.HLS == nil {
-		http.Error(w, "hls not enabled", http.StatusNotFound)
-		return
-	}
-	name := r.PathValue("name")
-	if name == "" || strings.Contains(name, "..") || strings.ContainsAny(name, "/\\") {
-		http.Error(w, "invalid name", http.StatusBadRequest)
-		return
-	}
-	fullPath := filepath.Join(s.cfg.HLS.OutputDir(), name)
-	// Set explicit content-type for HLS mime types — Go's mime map doesn't
-	// include .ts and would sniff the file as text otherwise.
-	switch filepath.Ext(name) {
-	case ".m3u8":
-		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
-	case ".ts":
-		w.Header().Set("Content-Type", "video/mp2t")
-	}
-w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-http.ServeFile(w, r, fullPath)
 }
 
 // extractPresetToken extracts the token from the URL path /api/ptz/preset/{token}.

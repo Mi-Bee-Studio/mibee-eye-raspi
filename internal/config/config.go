@@ -50,11 +50,6 @@ type WebConfig struct {
 	Password string `yaml:"password"` // HTTP Basic auth pass (empty -> onvif.password)
 }
 
-// RTMPConfig holds RTMP push settings.
-type RTMPConfig struct {
-	Enabled bool   `yaml:"enabled"` // Enable RTMP push
-	URL     string `yaml:"url"`     // RTMP push URL
-}
 
 // DeviceConfig holds ONVIF device information.
 type DeviceConfig struct {
@@ -76,7 +71,6 @@ type Config struct {
 	Camera  CameraConfig  `yaml:"camera"`
 	RTSP    RTSPConfig    `yaml:"rtsp"`
 	ONVIF   ONVIFConfig   `yaml:"onvif"`
-	RTMP    RTMPConfig    `yaml:"rtmp"`
 	Device  DeviceConfig  `yaml:"device"`
 	Logging LoggingConfig `yaml:"logging"`
 	Web     WebConfig    `yaml:"web"`
@@ -108,10 +102,6 @@ func DefaultConfig() *Config {
 			Port:     8080,
 			Username: "admin",
 			Password: "",
-		},
-		RTMP: RTMPConfig{
-			Enabled: false,
-			URL:     "rtmp://push-server/app/stream",
 		},
 		Device: DeviceConfig{
 			Name:         "Pi Camera V1",
@@ -183,11 +173,6 @@ func applyEnvOverrides(cfg *Config) {
 	overrideInt("MIBEE_EYE_ONVIF_PORT", &cfg.ONVIF.Port)
 	overrideString("MIBEE_EYE_ONVIF_USERNAME", &cfg.ONVIF.Username)
 	overrideString("MIBEE_EYE_ONVIF_PASSWORD", &cfg.ONVIF.Password)
-
-	// RTMP section
-	overrideBool("MIBEE_EYE_RTMP_ENABLED", &cfg.RTMP.Enabled)
-	overrideString("MIBEE_EYE_RTMP_URL", &cfg.RTMP.URL)
-
 	// Web section
 	overrideBool("MIBEE_EYE_WEB_ENABLED", &cfg.Web.Enabled)
 	overrideInt("MIBEE_EYE_WEB_PORT", &cfg.Web.Port)

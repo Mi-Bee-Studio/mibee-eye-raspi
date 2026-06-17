@@ -33,7 +33,6 @@ type Server struct {
 	auth            *Auth
 	actions         map[string]ActionHandler
 	config          ConfigProvider
-	snapshotHandler http.Handler // handles GET /snapshot
 	discoveryHandler http.Handler // handles WS-Discovery HTTP probes
 }
 
@@ -191,13 +190,7 @@ func isAuthRequired(action string) bool {
 	return false
 }
 
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Route /snapshot endpoint before SOAP processing.
-	if r.URL.Path == "/snapshot" && s.snapshotHandler != nil {
-		s.snapshotHandler.ServeHTTP(w, r)
-		return
-	}
-
+	func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeSOAPFault(w, "soap:Sender", fmt.Sprintf("unsupported method: %s", r.Method), http.StatusInternalServerError)
 		return

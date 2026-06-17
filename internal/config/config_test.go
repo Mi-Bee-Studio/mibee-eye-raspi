@@ -25,7 +25,6 @@ func TestLoadDefaults(t *testing.T) {
 camera: {}
 rtsp: {}
 onvif: {}
-rtmp: {}
 device: {}
 logging: {}
 `
@@ -89,13 +88,6 @@ logging: {}
 		t.Errorf("ONVIF.Password = %q, want empty", cfg.ONVIF.Password)
 	}
 
-	// RTMP defaults
-	if cfg.RTMP.Enabled != false {
-		t.Errorf("RTMP.Enabled = %v, want false", cfg.RTMP.Enabled)
-	}
-	if cfg.RTMP.URL != "rtmp://push-server/app/stream" {
-		t.Errorf("RTMP.URL = %q, want %q", cfg.RTMP.URL, "rtmp://push-server/app/stream")
-	}
 
 	// Device defaults
 	if cfg.Device.Name != "Pi Camera V1" {
@@ -144,9 +136,6 @@ onvif:
   port: 8081
   username: "onvifuser"
   password: "onvifpass"
-rtmp:
-  enabled: true
-  url: "rtmp://example.com/live/stream"
 device:
   name: "Test Camera"
   manufacturer: "TestCorp"
@@ -217,13 +206,6 @@ logging:
 		t.Errorf("ONVIF.Password = %q", cfg.ONVIF.Password)
 	}
 
-	// RTMP
-	if !cfg.RTMP.Enabled {
-		t.Errorf("RTMP.Enabled = false, want true")
-	}
-	if cfg.RTMP.URL != "rtmp://example.com/live/stream" {
-		t.Errorf("RTMP.URL = %q", cfg.RTMP.URL)
-	}
 
 	// Device
 	if cfg.Device.Name != "Test Camera" {
@@ -266,8 +248,6 @@ func TestEnvOverride(t *testing.T) {
 	t.Setenv("MIBEE_EYE_ONVIF_PORT", "9080")
 	t.Setenv("MIBEE_EYE_ONVIF_USERNAME", "envonvif")
 	t.Setenv("MIBEE_EYE_ONVIF_PASSWORD", "envonvifpass")
-	t.Setenv("MIBEE_EYE_RTMP_ENABLED", "true")
-	t.Setenv("MIBEE_EYE_RTMP_URL", "rtmp://env.example.com/stream")
 	t.Setenv("MIBEE_EYE_CAMERA_DEVICE", "/dev/videoEnv")
 	t.Setenv("MIBEE_EYE_CAMERA_CODEC", "h265")
 	t.Setenv("MIBEE_EYE_CAMERA_BITRATE", "5000000")
@@ -288,8 +268,6 @@ rtsp:
   port: 1111
 onvif:
   username: "yamluser"
-rtmp:
-  enabled: false
 device:
   name: "YAML Camera"
 logging:
@@ -349,12 +327,6 @@ logging:
 	}
 	if cfg.ONVIF.Password != "envonvifpass" {
 		t.Errorf("ONVIF.Password = %q, want envonvifpass (env override)", cfg.ONVIF.Password)
-	}
-	if !cfg.RTMP.Enabled {
-		t.Errorf("RTMP.Enabled = false, want true (env override)")
-	}
-	if cfg.RTMP.URL != "rtmp://env.example.com/stream" {
-		t.Errorf("RTMP.URL = %q, want rtmp://env.example.com/stream (env override)", cfg.RTMP.URL)
 	}
 	if cfg.Device.Name != "Env Camera" {
 		t.Errorf("Device.Name = %q, want Env Camera (env override)", cfg.Device.Name)
@@ -457,7 +429,6 @@ func TestLoadEmptyPasswordWarning(t *testing.T) {
 camera: {}
 rtsp: {}
 onvif: {}
-rtmp: {}
 device: {}
 logging: {}
 `

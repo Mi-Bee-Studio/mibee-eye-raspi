@@ -43,9 +43,7 @@ func (m *mockOnvifConfig) DeviceModel() string         { return "TestModel" }
 func (m *mockOnvifConfig) DeviceFirmware() string      { return "1.0.0" }
 func (m *mockOnvifConfig) DeviceHardwareID() string    { return "TEST001" }
 func (m *mockOnvifConfig) DeviceSerialNumber() string  { return "" }
-func (m *mockOnvifConfig) LoggingLevel() string        { return "info" }
-func (m *mockOnvifConfig) RTMPEnabled() bool           { return false }
-func (m *mockOnvifConfig) RTMPURL() string             { return "" }
+func (m *mockOnvifConfig) LoggingLevel() string { return "info" }
 
 func TestSaveConfigPreservesAllSections(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -124,7 +122,7 @@ web:
 	}
 
 	// Verify all sections are present.
-	sections := []string{"camera", "rtsp", "onvif", "rtmp", "device", "logging", "web"}
+	sections := []string{"camera", "rtsp", "onvif", "device", "logging", "web"}
 	for _, sec := range sections {
 		if _, ok := result[sec]; !ok {
 			t.Errorf("section %q is missing after save", sec)
@@ -144,18 +142,6 @@ web:
 	}
 	if onvif["port"] != 8080 {
 		t.Errorf("expected port 8080, got %v", onvif["port"])
-	}
-
-	// Verify other sections are intact.
-	rtmp, ok := result["rtmp"].(map[string]interface{})
-	if !ok {
-		t.Fatal("rtmp section is not a map")
-	}
-	if rtmp["enabled"] != true {
-		t.Errorf("expected rtmp.enabled=true, got %v", rtmp["enabled"])
-	}
-	if rtmp["url"] != "rtmp://example.com/live" {
-		t.Errorf("expected rtmp.url unchanged, got %v", rtmp["url"])
 	}
 
 	web, ok := result["web"].(map[string]interface{})
@@ -364,7 +350,7 @@ func TestHandleGetConfig_NoParams(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sections := []string{"camera", "rtsp", "onvif", "rtmp", "device", "logging", "web"}
+	sections := []string{"camera", "rtsp", "onvif", "device", "logging", "web"}
 	for _, sec := range sections {
 		if _, ok := resp[sec]; !ok {
 			t.Errorf("missing section %q", sec)

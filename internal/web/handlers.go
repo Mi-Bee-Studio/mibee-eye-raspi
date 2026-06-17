@@ -58,10 +58,6 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 			"username": oc.ONVIFUsername(),
 			"password": maskPassword(oc.ONVIFPassword()),
 		},
-		"rtmp": map[string]interface{}{
-			"enabled": oc.RTMPEnabled(),
-			"url":     oc.RTMPURL(),
-		},
 		"device": map[string]interface{}{
 			"name":           oc.DeviceName(),
 			"manufacturer":   oc.DeviceManufacturer(),

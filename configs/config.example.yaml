@@ -52,14 +52,6 @@ onvif:
   username: "admin"
   password: ""  # REQUIRED: set your ONVIF password
 
-# RTMP push settings (disabled by default)
-rtmp:
-  # Enable RTMP push to cloud services
-  enabled: false
-
-  # RTMP push URL (e.g., Aliyun, Twitch, YouTube)
-  url: "rtmp://push-server/app/stream"
-
 # ONVIF device information (exposed via GetDeviceInformation)
 device:
   # Friendly camera name

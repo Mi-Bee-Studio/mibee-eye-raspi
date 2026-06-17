@@ -457,7 +457,6 @@ func TestSecurityHeaders(t *testing.T) {
 		{"static js", "/static/app.js", true},
 		{"api login", "/api/login", false},
 		{"api config", "/api/config", false},
-		{"hls", "/api/hls/stream.m3u8", false},
 		{"ws", "/ws", false},
 	}
 

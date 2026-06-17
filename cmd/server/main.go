@@ -15,10 +15,8 @@ import (
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/camera"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/config"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/h264"
-	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/hls"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/onvif"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/ptz"
-	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/rtmp"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/rtsp"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/web"
 )
@@ -53,8 +51,6 @@ func (a *configAdapter) DeviceFirmware() string     { return a.cfg.Device.Firmwa
 func (a *configAdapter) DeviceHardwareID() string   { return a.cfg.Device.HardwareID }
 func (a *configAdapter) DeviceSerialNumber() string { return a.cfg.Device.SerialNumber }
 func (a *configAdapter) LoggingLevel() string       { return a.cfg.Logging.Level }
-func (a *configAdapter) RTMPEnabled() bool          { return a.cfg.RTMP.Enabled }
-func (a *configAdapter) RTMPURL() string            { return a.cfg.RTMP.URL }
 
 // detectLocalIP finds the first non-loopback IPv4 address.
 func detectLocalIP() string {
@@ -154,9 +150,6 @@ adapter := &configAdapter{cfg: cfg, deviceIP: localIP}
 		Codec:        "H264",
 	}
 
-	// Determine the external RTSP URL for HLS consumption.
-	// When camera mode=rtsp, the stream comes from MediaMTX and we point
-	// GetStreamUri/HLS/RTMP at MediaMTX's RTSP URL instead of our own server.
 	externalRTSPURL := ""
 	var cam camera.Camera
 	if cfg.Camera.Mode == "rtsp" {
@@ -182,17 +175,6 @@ adapter := &configAdapter{cfg: cfg, deviceIP: localIP}
 	parser := h264.NewParser()
 	auHub := h264.NewAUHub()
 
-	// Snapshot: subscribe BEFORE parser goroutine to ensure the first SPS/PPS+IDR
-	// keyframe is captured. The camera sends SPS/PPS only in the initial frame;
-	// all subsequent keyframes contain IDR only.
-	snapshotBuf := onvif.NewSnapshotBuffer()
-	snapshotSub := auHub.Subscribe(ctx)
-	go func() {
-		for au := range snapshotSub.Channel {
-			snapshotBuf.Feed(au)
-		}
-	}()
-
 	go func() {
 		for frame := range cam.Frames() {
 			nalus := parser.Parse(frame.Data)
@@ -216,11 +198,7 @@ adapter := &configAdapter{cfg: cfg, deviceIP: localIP}
 
 	// --- Step 3: RTSP Server (skipped when consuming external RTSP) ---
 	var rtspServer *rtsp.Server
-	// rtspURLForConsumers is what HLS/RTMP should connect to.
-	// When mode=rtsp, they connect to the external source directly.
-	rtspURLForConsumers := fmt.Sprintf("rtsp://127.0.0.1:%d/stream", cfg.RTSP.Port)
 	if externalRTSPURL != "" {
-		rtspURLForConsumers = externalRTSPURL
 	} else {
 		rtspSub := auHub.Subscribe(ctx)
 		rtspServer = rtsp.New(rtsp.Config{
@@ -234,20 +212,6 @@ adapter := &configAdapter{cfg: cfg, deviceIP: localIP}
 		if err := rtspServer.Start(ctx); err != nil {
 			log.Fatalf("rtsp server start: %v", err)
 		}
-	}
-
-	// --- Step 3.5: HLS Bridge (ffmpeg RTSP -> HLS for browser playback) ---
-	hlsServer := hls.New(hls.Config{
-		RTSPURL:      rtspURLForConsumers,
-		OutputDir:    "/tmp/hls-mibee-eye",
-		SegmentTime:  1,
-		ListSize:     6,
-		Username:     cfg.RTSP.Username,
-		Password:     cfg.RTSP.Password,
-		RestartOnExit: true,
-	})
-	if err := hlsServer.Start(ctx); err != nil {
-		log.Printf("warning: HLS bridge not started (web preview disabled): %v", err)
 	}
 
 
@@ -274,9 +238,6 @@ adapter := &configAdapter{cfg: cfg, deviceIP: localIP}
 	onvif.RegisterImagingHandlers(onvifServer, paramManager)
 	onvif.RegisterPTZHandlers(onvifServer, ptzState)
 
-	// Snapshot handlers (buffer already fed from AUHub goroutine started in Step 2)
-	onvif.RegisterSnapshotHandlers(onvifServer, snapshotBuf, nil)
-
 	var webServer *web.Server
 	// --- Step 5.5: Web UI Server ---
 	if cfg.Web.Enabled {
@@ -288,8 +249,7 @@ adapter := &configAdapter{cfg: cfg, deviceIP: localIP}
 			OnvifConfig: adapter,
 			Params:      paramManager,
 			PTZ:         ptzState,
-			Snapshot:    snapshotBuf,
-			HLS:         hlsServer,
+			AUHub:       auHub,
 			Version:     version,
 		})
 		go func() {
@@ -313,27 +273,8 @@ adapter := &configAdapter{cfg: cfg, deviceIP: localIP}
 		}
 	}()
 
-	var rtmpPush *rtmp.Push
-	// --- Step 7: RTMP Push (optional) ---
-	if cfg.RTMP.Enabled {
-		rtmpPush = rtmp.New(rtmp.Config{
-			Enabled: true,
-			URL:     cfg.RTMP.URL,
-			RTSPURL: rtspURLForConsumers,
-		})
-		rtmpPush.Start(ctx)
-	}
-
 	<-ctx.Done()
 	log.Printf("MiBee Eye %s shutting down...", version)
-
-	// Ordered shutdown in reverse startup order with 5s timeouts per step
-	shutdownStep("rtmp", 5*time.Second, func() error {
-		if rtmpPush != nil {
-			return rtmpPush.Stop()
-		}
-		return nil
-	})
 	shutdownStep("discovery", 5*time.Second, func() error { return discovery.StopUDP() })
 	shutdownStep("onvif", 5*time.Second, func() error { return onvifServer.Stop() })
 	shutdownStep("web", 5*time.Second, func() error {
@@ -342,7 +283,6 @@ adapter := &configAdapter{cfg: cfg, deviceIP: localIP}
 		}
 		return nil
 	})
-	shutdownStep("hls", 5*time.Second, func() error { return hlsServer.Stop() })
 	shutdownStep("rtsp", 5*time.Second, func() error {
 		if rtspServer != nil {
 			return rtspServer.Stop()
