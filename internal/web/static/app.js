@@ -5,10 +5,10 @@
        Constants
        ====================================================================== */
 
-    var SNAPSHOT_INTERVAL = 2000;
     var WS_RECONNECT_DELAY = 3000;
     var RESTART_RELOAD_DELAY = 3000;
     var TOAST_DEFAULT_DURATION = 4000;
+    var MSE_RECONNECT_DELAY = 2000;
 
     var STORAGE_KEY_TOKEN = 'mibee-eye:token';
     var STORAGE_KEY_USER  = 'mibee-eye:user';
@@ -65,8 +65,7 @@
             'server.editOnvif': 'Edit ONVIF Credentials',
 
             'camera.preview': 'Live Preview',
-            'camera.previewSub': 'HLS live stream, ~3s latency.',
-            'camera.noSnapshot': 'No snapshot available',
+            'camera.previewSub': 'Live video over WebSocket.',
             'camera.connecting': 'Connecting…',
             'camera.live': 'LIVE',
             'camera.imaging': 'Imaging Controls',
@@ -174,8 +173,7 @@
             'server.editOnvif': '编辑 ONVIF 凭据',
 
             'camera.preview': '实时预览',
-            'camera.previewSub': 'HLS 直播流，约 3 秒延迟。',
-            'camera.noSnapshot': '暂无截图',
+            'camera.previewSub': '通过 WebSocket 实现实时视频。',
             'camera.connecting': '连接中…',
             'camera.live': '直播',
             'camera.imaging': '图像控制',
@@ -261,15 +259,10 @@
         token: null,
         username: null,
         currentTab: 'server',
-        snapshotTimer: null,
-        metaTimer: null,
         ws: null,
         wsReconnectTimer: null,
-        snapshotLoadTime: 0,
-        snapshotFailures: 0,
-        hlsInstance: null,
-        videoPlaying: false,
-        snapshotInitialized: false,
+        mseActive: false,
+        msePlaying: false,
     };
 
     /* ======================================================================
@@ -306,9 +299,10 @@
     function renderSkeleton(container, lines) {
         if (!container) return;
         var sk = el('div', { className: 'skeleton' });
-        (lines || 3).forEach(function () {
+        var count = lines || 3;
+        for (var i = 0; i < count; i++) {
             sk.appendChild(el('div', { className: 'skeleton-line' }));
-        });
+        }
         container.innerHTML = '';
         container.appendChild(sk);
     }
@@ -506,6 +500,7 @@
             }).catch(function () { /* silent */ });
         }
         clearToken();
+        destroyMsePlayer();
         closeWS();
         setAuth(false);
         /* Reset form */
@@ -602,6 +597,7 @@
         return fetch(url, opts).then(function (r) {
             if (r.status === 401) {
                 /* Token expired or invalid — return to login */
+                destroyMsePlayer();
                 closeWS();
                 clearToken();
                 setAuth(false);
@@ -687,38 +683,12 @@
             pageTitle.textContent = t(tab === 'camera' ? 'nav.camera' : 'nav.server');
         }
         if (tab === 'camera') {
-            if (!state.snapshotInitialized) {
-                state.snapshotInitialized = true;
-                initSnapshot();
-            }
             if (!state.imagingRendered) loadImaging();
             if (!state.ptzRendered) loadPTZ();
-            /* Restart HLS if it was destroyed by leaving the tab */
-            if (!state.hlsInstance && !state.videoPlaying) {
-                initLiveVideo();
-            }
-            /* Restart snapshot/meta timers when entering camera tab */
-            if (!state.snapshotTimer) {
-                refreshSnapshot();
-                state.snapshotTimer = setInterval(refreshSnapshot, SNAPSHOT_INTERVAL);
-                state.metaTimer = setInterval(updateSnapshotMeta, 1000);
-            }
+            startMsePlayer();
         }
-        /* Stop HLS playback and snapshot timers when leaving camera tab */
         if (tab !== 'camera') {
-            if (state.hlsInstance) {
-                try { state.hlsInstance.destroy(); } catch (e) {}
-                state.hlsInstance = null;
-                state.videoPlaying = false;
-            }
-            if (state.snapshotTimer) {
-                clearInterval(state.snapshotTimer);
-                state.snapshotTimer = null;
-            }
-            if (state.metaTimer) {
-                clearInterval(state.metaTimer);
-                state.metaTimer = null;
-            }
+            destroyMsePlayer();
         }
     }
 
@@ -996,165 +966,653 @@
     }
 
     /* ======================================================================
-       Camera Tab — Snapshot
+       Camera Tab — WebSocket + MSE Live Video Player
        ====================================================================== */
 
-    function initSnapshot() {
-        var img = $('#snapshot');
-        var placeholder = $('#snapshot-placeholder');
-        var meta = $('#snapshot-meta');
+    /* --- fMP4 Muxer --- */
 
-        img.addEventListener('load', function () {
-            img.hidden = false;
-            if (placeholder) placeholder.style.display = 'none';
-            state.snapshotLoadTime = Date.now();
-            state.snapshotFailures = 0;
-            updateSnapshotMeta();
-        });
-
-        img.addEventListener('error', function () {
-            img.hidden = true;
-            if (placeholder) placeholder.style.display = 'flex';
-            state.snapshotFailures++;
-            updateSnapshotMeta();
-        });
-
-        refreshSnapshot();
-        if (!state.snapshotTimer) {
-            state.snapshotTimer = setInterval(refreshSnapshot, SNAPSHOT_INTERVAL);
-            state.metaTimer = setInterval(updateSnapshotMeta, 1000);
-        }
+    function str(s) {
+        var b = new Uint8Array(s.length);
+        for (var i = 0; i < s.length; i++) b[i] = s.charCodeAt(i);
+        return b;
     }
 
-    /* ======================================================================
-       Camera Tab — HLS Live Video (preferred over JPEG when available)
-       ====================================================================== */
+    function u32(v) {
+        var b = new Uint8Array(4);
+        new DataView(b.buffer).setUint32(0, v >>> 0);
+        return b;
+    }
 
-    function initLiveVideo() {
-        var video = $('#live-video');
-        if (!video) return false;
-        var img = $('#snapshot');
-        var placeholder = $('#snapshot-placeholder');
+    function u16(v) {
+        var b = new Uint8Array(2);
+        new DataView(b.buffer).setUint16(0, v);
+        return b;
+    }
 
-        video.style.display = 'none';
+    function u8(v) {
+        return new Uint8Array([v]);
+    }
 
-        function onPlaying() {
-            // HLS stream is up — hide JPEG snapshot, show video, mark live.
-            if (img) img.hidden = true;
-            video.style.display = 'block';
-            if (placeholder) placeholder.style.display = 'none';
-            state.videoPlaying = true;
-            state.snapshotLoadTime = Date.now();
-            state.snapshotFailures = 0;
-            updateSnapshotMeta();
-            // Stop snapshot polling while HLS is active.
-            if (state.snapshotTimer) {
-                clearInterval(state.snapshotTimer);
-                state.snapshotTimer = null;
-            }
-            if (state.metaTimer) {
-                clearInterval(state.metaTimer);
-                state.metaTimer = null;
-            }
+    function concat(arrays) {
+        var total = 0;
+        for (var i = 0; i < arrays.length; i++) total += arrays[i].byteLength;
+        var r = new Uint8Array(total);
+        var off = 0;
+        for (var i = 0; i < arrays.length; i++) {
+            r.set(arrays[i], off);
+            off += arrays[i].byteLength;
         }
+        return r;
+    }
 
-        function fallbackToSnapshot() {
-            // HLS failed — unhide the JPEG snapshot path so the user sees something.
-            if (video) video.style.display = 'none';
-            if (img) img.hidden = false;
-            if (state.hlsInstance) {
-                try { state.hlsInstance.destroy(); } catch (e) {}
-                state.hlsInstance = null;
-            }
-            state.videoPlaying = false;
-            // Restart snapshot polling for fallback mode.
-            if (!state.snapshotTimer) {
-                refreshSnapshot();
-                state.snapshotTimer = setInterval(refreshSnapshot, SNAPSHOT_INTERVAL);
-                state.metaTimer = setInterval(updateSnapshotMeta, 1000);
-            }
-            // If we have never loaded a JPEG, trigger one now.
-            if (img && !img.src) refreshSnapshot();
-        }
+    function box(type, contents) {
+        var payload = Array.isArray(contents) ? concat(contents) : contents;
+        var len = 8 + payload.byteLength;
+        var b = new Uint8Array(len);
+        var view = new DataView(b.buffer);
+        view.setUint32(0, len);
+        b.set(str(type), 4);
+        b.set(payload instanceof Uint8Array ? payload : new Uint8Array(payload), 8);
+        return b;
+    }
 
-        // hls.js path (Chrome, Firefox, Edge, etc.)
-        if (window.Hls && Hls.isSupported()) {
-            var hls = new Hls({
-                liveSyncDurationCount: 3,
-                liveMaxLatencyDurationCount: 6,
-                enableWorker: false,
-                lowLatencyMode: false,
-                xhrSetup: function(xhr) {
-                    if (state.token) {
-                        xhr.setRequestHeader('Authorization', 'Bearer ' + state.token);
+    // Parse SPS NALU to extract actual video dimensions
+    function parseSpsDimensions(sps) {
+        try {
+            var data = sps;
+            var profileIdc = data[1];
+            var i = 4; // skip NALU header(1) + profile(1) + constraints(1) + level(1)
+
+            // Bit reader
+            var bitPos = 0;
+            function readBit() {
+                var byteIdx = (i * 8 + bitPos) >> 3;
+                var bitIdx = 7 - ((i * 8 + bitPos) & 7);
+                // Re-calculate from absolute position
+                byteIdx = i + Math.floor(bitPos / 8);
+                bitIdx = 7 - (bitPos % 8);
+                if (byteIdx >= data.length) return 0;
+                bitPos++;
+                return (data[byteIdx] >> bitIdx) & 1;
+            }
+            function readUE() {
+                var leadingZeros = 0;
+                while (readBit() === 0 && leadingZeros < 32) leadingZeros++;
+                if (leadingZeros === 0) return 0;
+                var val = 1;
+                for (var b = 0; b < leadingZeros; b++) val = (val << 1) | readBit();
+                return val - 1;
+            }
+            function readU(n) {
+                var val = 0;
+                for (var b = 0; b < n; b++) val = (val << 1) | readBit();
+                return val;
+            }
+
+            // Reset bit reader to after level_idc (byte offset 4)
+            i = 4; bitPos = 0;
+
+            var spsId = readUE();
+
+            // High profile (100) has extra fields
+            var chromaFormatIdc = 1;
+            if (profileIdc === 100 || profileIdc === 110 || profileIdc === 122 ||
+                profileIdc === 244 || profileIdc === 44 || profileIdc === 83 ||
+                profileIdc === 86 || profileIdc === 118 || profileIdc === 128 ||
+                profileIdc === 138 || profileIdc === 139 || profileIdc === 134 ||
+                profileIdc === 135) {
+                chromaFormatIdc = readUE();
+                if (chromaFormatIdc === 3) readU(1); // separate_colour_plane_flag
+                readUE(); // bit_depth_luma_minus8
+                readUE(); // bit_depth_chroma_minus8
+                readU(1); // qpprime_y_zero_transform_bypass_flag
+                var spsScaling = readU(1); // seq_scaling_matrix_present_flag
+                if (spsScaling) {
+                    var nLists = chromaFormatIdc === 3 ? 12 : 8;
+                    for (var li = 0; li < nLists; li++) {
+                        if (readU(1)) { // scaling_list_present_flag
+                            // skip scaling list (hard to parse, just bail)
+                            return null;
+                        }
                     }
-                },
-            });
-            state.hlsInstance = hls;
-            hls.loadSource('/api/hls/stream.m3u8?token=' + encodeURIComponent(state.token || ''));
-            hls.attachMedia(video);
-
-            hls.on(Hls.Events.MANIFEST_PARSED, function () {
-                video.play().catch(function () { /* autoplay may be blocked */ });
-            });
-            video.addEventListener('playing', onPlaying);
-
-            hls.on(Hls.Events.ERROR, function (_event, data) {
-                if (!data.fatal) return;
-                if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-                    hls.startLoad();
-                } else {
-                    fallbackToSnapshot();
                 }
-            });
-            
-            // Fallback timeout: if HLS hasn't started playing in 8s, use snapshot
-            setTimeout(function() {
-                if (!state.videoPlaying) {
-                    fallbackToSnapshot();
-                }
-            }, 8000);
-            
-            // Start snapshot polling immediately as a preview while HLS loads
-            refreshSnapshot();
-            return true;
-        }
-
-        // Native HLS path (Safari)
-        if (video.canPlayType('application/vnd.apple.mpegurl')) {
-            video.src = '/api/hls/stream.m3u8?token=' + encodeURIComponent(state.token || '');
-            video.addEventListener('playing', onPlaying);
-            video.addEventListener('error', function () { fallbackToSnapshot(); });
-            return true;
-        }
-
-        // No HLS support — caller should rely on the JPEG snapshot path.
-        return false;
-    }
-
-    function refreshSnapshot() {
-        if (state.videoPlaying) return;
-        var img = $('#snapshot');
-        if (!img) return;
-        img.src = '/api/snapshot?ts=' + Date.now() + (state.token ? '&token=' + encodeURIComponent(state.token) : '');
-    }
-
-    function updateSnapshotMeta() {
-        var meta = $('#snapshot-meta');
-        if (!meta) return;
-        if (state.snapshotLoadTime === 0) {
-            if (state.snapshotFailures > 0) {
-                meta.textContent = t('camera.connecting');
-                meta.classList.remove('live');
-            } else {
-                meta.textContent = '—';
-                meta.classList.remove('live');
             }
+
+            readUE(); // log2_max_frame_num_minus4
+            var picOrderCntType = readUE();
+            if (picOrderCntType === 0) {
+                readUE(); // log2_max_pic_order_cnt_lsb_minus4
+            } else if (picOrderCntType === 1) {
+                readU(1); // delta_pic_order_always_zero_flag
+                readUE(); // offset_for_non_ref_pic
+                readUE(); // offset_for_top_to_bottom_field
+                var nRef = readUE(); // num_ref_frames_in_pic_order_cnt_cycle
+                for (var ri = 0; ri < nRef; ri++) readUE();
+            }
+
+            readUE(); // max_num_ref_frames
+            readU(1); // gaps_in_frame_num_value_allowed_flag
+            var picWidthInMbsMinus1 = readUE();
+            var picHeightInMapUnitsMinus1 = readUE();
+            var frameMbsOnlyFlag = readU(1);
+
+            var width = (picWidthInMbsMinus1 + 1) * 16;
+            var height = (2 - frameMbsOnlyFlag) * (picHeightInMapUnitsMinus1 + 1) * 16;
+
+            console.log('[MSE] SPS parsed: ' + width + 'x' + height + ' (mbs=' + (picWidthInMbsMinus1+1) + 'x' + (picHeightInMapUnitsMinus1+1) + ' frameMbsOnly=' + frameMbsOnlyFlag + ')');
+            return { width: width, height: height };
+        } catch (e) {
+            console.warn('[MSE] SPS parse failed:', e.message);
+            return null;
+        }
+    }
+
+    function buildAvcc(sps, pps) {
+        return box('avcC', [
+            u8(1),                          // configurationVersion
+            u8(sps[1]),                     // AVCProfileIndication
+            u8(sps[2]),                     // profile_compatibility
+            u8(sps[3]),                     // AVCLevelIndication
+            u8(0xFC | 3),                   // lengthSizeMinusOne (4 bytes)
+            u8(0xE0 | 1),                   // numOfSequenceParameterSets
+            u16(sps.byteLength),            // SPS length
+            sps,                            // SPS data
+            u8(1),                          // numOfPictureParameterSets
+            u16(pps.byteLength),            // PPS length
+            pps                             // PPS data
+        ]);
+    }
+
+    function buildInitSegment(sps, pps, trackId) {
+        var ts = 90000;
+        var dims = parseSpsDimensions(sps) || { width: 1280, height: 720 };
+        var w = dims.width, h = dims.height;
+
+        // mvhd
+        var mvhd = box('mvhd', [
+            u32(0), u32(0), u32(0),          // version=0, ctime, mtime
+            u32(ts),                         // timescale
+            u32(0),                          // duration (live)
+            u32(0x00010000),                 // rate 1.0
+            u16(0x0100), u16(0),             // volume, reserved
+            u32(0), u32(0),                  // reserved
+            // matrix (identity)
+            u32(0x00010000), u32(0), u32(0),
+            u32(0), u32(0x00010000), u32(0),
+            u32(0), u32(0), u32(0x40000000),
+            u32(0), u32(0), u32(0), u32(0), u32(0), u32(0), // pre-defined
+            u32(2)                           // next track ID
+        ]);
+
+        // tkhd
+        var tkhd = box('tkhd', [
+            u32(0x0003),                     // enabled | inMovie
+            u32(0), u32(0),                  // ctime, mtime
+            u32(trackId),                    // track ID
+            u32(0),                          // reserved
+            u32(0),                          // duration
+            u32(0), u32(0),                  // reserved
+            u16(0), u16(0),                  // layer, alternate_group
+            u16(0), u16(0),                  // volume, reserved
+            // matrix
+            u32(0x00010000), u32(0), u32(0),
+            u32(0), u32(0x00010000), u32(0),
+            u32(0), u32(0), u32(0x40000000),
+            u32(w << 16),                    // width
+            u32(h << 16)                     // height
+        ]);
+
+        // mdhd
+        var mdhd = box('mdhd', [
+            u32(0), u32(0), u32(0),
+            u32(ts),                         // timescale
+            u32(0),                          // duration
+            u16(0x55C4), u16(0)              // language 'und', pre-defined
+        ]);
+
+        // hdlr
+        var hdlr = box('hdlr', [
+            u32(0), u32(0), str('vide'),
+            u32(0), u32(0), u32(0),            // reserved
+            str('VideoHandler\x00')                // name (null-terminated)
+        ]);
+
+        // vmhd
+        var vmhd = box('vmhd', [
+            u32(0x0001),                     // version=0, flags=1
+            u16(0), u16(0), u16(0), u16(0)   // graphics mode, opcolor
+        ]);
+
+        // dref
+        var dref = box('dref', [u32(0), u32(1), box('url ', u32(0x0001))]);
+        var dinf = box('dinf', dref);
+
+        // avcC + avc1 + stsd
+        var avcC = buildAvcc(sps, pps);
+        var avc1 = box('avc1', [
+            u32(0), u16(0), u16(1),          // reserved, data_ref_index
+            u16(0), u16(0),                   // pre-defined
+            str('\x00\x00\x00\x00'),          // vendor
+            u32(0), u32(0),                   // temporal, spatial quality
+            u16(w), u16(h),                   // width, height
+            u32(0x00480000), u32(0x00480000), // resolution 72dpi
+            u32(0), u16(1),                   // data_size, frame_count
+            str('\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00' +
+                 '\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'), // compressorname
+            u16(0x0018), u16(0xFFFF),         // depth, pre-defined
+            avcC
+        ]);
+        var stsd = box('stsd', [u32(0), u32(1), avc1]);
+
+        // empty tables (fragmented)
+        var stts = box('stts', [u32(0), u32(0)]);
+        var stsc = box('stsc', [u32(0), u32(0)]);
+        var stsz = box('stsz', [u32(0), u32(0), u32(0)]);
+        var stco = box('stco', [u32(0), u32(0)]);
+
+        var stbl = box('stbl', [stsd, stts, stsc, stsz, stco]);
+        var minf = box('minf', [vmhd, dinf, stbl]);
+        var mdia = box('mdia', [mdhd, hdlr, minf]);
+        var trak = box('trak', [tkhd, mdia]);
+
+        // mvex + trex
+        var trex = box('trex', [u32(0), u32(trackId), u32(1), u32(0), u32(0), u32(0)]);
+        var mvex = box('mvex', trex);
+        var moov = box('moov', [mvhd, trak, mvex]);
+
+        // ftyp
+        var ftyp = box('ftyp', [str('isom'), u32(0x200), str('isom'), str('iso2'), str('avc1'), str('mp41')]);
+
+        return concat([ftyp, moov]);
+    }
+
+    function buildFragment(frameNalus, isIDR, seqNum, decodeTime, trackId, duration) {
+        // Convert NALUs to AVCC format (4-byte length prefix)
+        var avccParts = [];
+        for (var i = 0; i < frameNalus.length; i++) {
+            var n = frameNalus[i];
+            avccParts.push(u32(n.byteLength));
+            avccParts.push(n);
+        }
+        var avccData = concat(avccParts);
+        var sampleSize = avccData.byteLength;
+        if (seqNum === 1) {
+            console.log('[MSE] buildFragment: nalus=' + frameNalus.length + ' nalu0_len=' + frameNalus[0].byteLength + ' nalu0_first=0x' + frameNalus[0][0].toString(16));
+            console.log('[MSE] buildFragment: avccData len=' + avccData.byteLength + ' first8:', Array.from(avccData.slice(0, 8)).map(function(b) { return b.toString(16).padStart(2, '0'); }).join(' '));
+        }
+        var sampleFlags = isIDR ? 0x02000000 : 0x01010000;
+
+        // tfdt
+        var tfdt = box('tfdt', [
+            u8(1), u8(0), u8(0), u8(0),      // version=1, flags=0
+            u32(Math.floor(decodeTime / 4294967296)),
+            u32(decodeTime >>> 0)
+        ]);
+
+        // tfhd
+        var tfhd = box('tfhd', [u32(0x020000), u32(trackId)]); // default-base-is-moof
+
+        // mfhd
+        var mfhd = box('mfhd', [u32(0), u32(seqNum)]);
+
+        // trun
+        // trun (data-offset patched after moof size is known)
+        var trun = box('trun', [
+            u32(0x000701),                   // version=0, flags: data-offset+duration+size+flags
+            u32(1),                          // sample count
+            u32(0),                          // placeholder data-offset
+            u32(duration),                   // sample duration
+            u32(sampleSize),                 // sample size
+            u32(sampleFlags)                 // sample flags
+        ]);
+
+        var traf = box('traf', [tfhd, tfdt, trun]);
+        var moof = box('moof', [mfhd, traf]);
+
+        // Patch data-offset: offset from moof start to mdat payload
+        // moof size is deterministic, so rebuild with correct value
+        var dataOffset = moof.byteLength + 8; // 8 = mdat box header (size + type)
+        trun = box('trun', [
+            u32(0x000701),
+            u32(1),
+            u32(dataOffset),                 // correct data-offset
+            u32(duration),
+            u32(sampleSize),
+            u32(sampleFlags)
+        ]);
+        traf = box('traf', [tfhd, tfdt, trun]);
+        moof = box('moof', [mfhd, traf]);
+
+        var mdat = box('mdat', avccData);
+
+        return concat([moof, mdat]);
+    }
+
+    /* --- Annex-B Parser --- */
+
+    function parseAnnexB(data) {
+        var nalus = [];
+        var i = 0;
+        var start = -1;
+        while (i < data.length) {
+            if (i + 3 < data.length && data[i] === 0 && data[i+1] === 0 && data[i+2] === 0 && data[i+3] === 1) {
+                if (start >= 0) nalus.push(data.slice(start, i));
+                start = i + 4;
+                i += 4;
+            } else if (i + 2 < data.length && data[i] === 0 && data[i+1] === 0 && data[i+2] === 1) {
+                if (start >= 0) nalus.push(data.slice(start, i));
+                start = i + 3;
+                i += 3;
+            } else {
+                i++;
+            }
+        }
+        if (start >= 0) nalus.push(data.slice(start));
+        return nalus;
+    }
+
+    function naluType(nalu) { return nalu[0] & 0x1F; }
+
+    /* --- MSE Player --- */
+
+    var msePlayer = null;
+
+    function startMsePlayer() {
+        if (!state.token) return;
+        if (state.mseActive) return;
+
+        var video = document.getElementById('live-video');
+        var placeholder = document.getElementById('video-placeholder');
+        var badge = document.getElementById('live-badge');
+        if (!video || !placeholder) return;
+
+        if (!window.MediaSource) {
+            setMseBadge(badge, 'MSE unsupported');
             return;
         }
-        var elapsed = Math.floor((Date.now() - state.snapshotLoadTime) / 1000);
-        meta.classList.add('live');
-        meta.textContent = t('camera.live') + '  ·  ' + elapsed + 's';
+
+        state.mseActive = true;
+        state.msePlaying = false;
+
+        var mediaSource = null;
+        var sourceBuffer = null;
+        var ws = null;
+        var reconnectTimer = null;
+        var sps = null;
+        var pps = null;
+        var initSent = false;
+        var sequenceNumber = 1;
+        var baseDecodeTime = 0;
+        var frameCount = 0;
+        var trackId = 1;
+        var frameDuration = 6000; // 90000/15fps
+        var pendingQueue = [];
+        var appending = false;
+        var destroyed = false;
+        var reconnectAttempts = 0;
+        var lastFrameTime = 0;
+
+        function cleanupState() {
+            if (sourceBuffer && mediaSource && mediaSource.sourceBuffers.length > 0) {
+                try { mediaSource.endOfStream(); } catch (e) { /* ignore */ }
+            }
+            if (mediaSource && mediaSource.readyState === 'open') {
+                try { mediaSource.endOfStream(); } catch (e) { /* ignore */ }
+            }
+            if (ws) {
+                try { ws.close(); } catch (e) { /* ignore */ }
+                ws = null;
+            }
+            if (reconnectTimer) {
+                clearTimeout(reconnectTimer);
+                reconnectTimer = null;
+            }
+            if (video) {
+                if (video.src) {
+                    try { URL.revokeObjectURL(video.src); } catch (e) { /* ignore */ }
+                    video.src = '';
+                }
+            }
+            pendingQueue = [];
+            appending = false;
+            sps = null;
+            pps = null;
+            initSent = false;
+            mediaSource = null;
+            sourceBuffer = null;
+        }
+
+        function setBadgeText(text, isLive) {
+            if (!badge) return;
+            badge.textContent = text;
+            badge.className = 'live-badge' + (isLive ? ' live' : '');
+        }
+
+        function hidePlaceholder() {
+            if (placeholder) placeholder.style.display = 'none';
+        }
+
+        function showPlaceholder() {
+            if (placeholder) placeholder.style.display = 'flex';
+        }
+
+        function appendToSourceBuffer(data) {
+            if (destroyed) return;
+            if (!sourceBuffer) return;
+
+            function doAppend() {
+                if (destroyed) return;
+                try {
+                    sourceBuffer.appendBuffer(data);
+                    appending = true;
+                } catch (e) {
+                    // Buffer full or other error, drop frame
+                    appending = false;
+                    pendingQueue = [];
+                }
+            }
+
+            if (appending) {
+                pendingQueue.push(data);
+                return;
+            }
+            doAppend();
+        }
+
+        // SourceBuffer created dynamically in handleData when SPS arrives
+
+
+        function handleData(data) {
+            if (!(data instanceof ArrayBuffer)) return;
+            reconnectAttempts = 0;
+
+            var bytes = new Uint8Array(data);
+            var nalus = parseAnnexB(bytes);
+
+            var foundSps = null, foundPps = null;
+            var frameNalus = [];
+            var isIDR = false;
+
+            for (var i = 0; i < nalus.length; i++) {
+                var type = naluType(nalus[i]);
+                if (type === 7) foundSps = nalus[i];
+                else if (type === 8) foundPps = nalus[i];
+                else if (type === 5) { isIDR = true; frameNalus.push(nalus[i]); }
+                else if (type === 1) frameNalus.push(nalus[i]);
+            }
+
+            if (foundSps) sps = foundSps;
+            if (foundPps) pps = foundPps;
+
+            // First SPS+PPS: derive codec, create SourceBuffer, send init segment
+            if (sps && pps && !initSent) {
+                var profileHex = sps[1].toString(16).padStart(2, '0');
+                var constraintsHex = sps[2].toString(16).padStart(2, '0');
+                var levelHex = sps[3].toString(16).padStart(2, '0');
+                var codec = 'avc1.' + profileHex + constraintsHex + levelHex;
+                console.log('[MSE] SPS profile=' + sps[1] + ' constraints=' + sps[2] + ' level=' + sps[3] + ' codec=' + codec);
+                console.log('[MSE] SPS first 8 bytes:', Array.from(sps.slice(0, 8)).map(function(b) { return b.toString(16).padStart(2, '0'); }).join(' '));
+
+                try {
+                    sourceBuffer = mediaSource.addSourceBuffer('video/mp4; codecs="' + codec + '"');
+                    sourceBuffer.mode = 'sequence';
+                    console.log('[MSE] SourceBuffer created with codec:', codec);
+                } catch (e) {
+                    console.warn('[MSE] Codec', codec, 'failed:', e, '— trying generic');
+                    try {
+                        sourceBuffer = mediaSource.addSourceBuffer('video/mp4');
+                    } catch (e2) {
+                        console.error('[MSE] Fallback also failed:', e2);
+                        return;
+                    }
+                }
+
+                var _playStarted = false;
+                sourceBuffer.addEventListener('updateend', function () {
+                    appending = false;
+                    if (!_playStarted && !destroyed && video.buffered.length > 0) {
+                        _playStarted = true;
+                        console.log('[MSE] First buffer range ready, calling video.play()');
+                        var p = video.play();
+                        if (p && p.catch) p.catch(function (e) { console.warn('[MSE] play() rejected:', e.name, e.message); });
+                    }
+                    if (pendingQueue.length > 0 && !destroyed) {
+                        var next = pendingQueue.shift();
+                        try {
+                            sourceBuffer.appendBuffer(next);
+                            appending = true;
+                        } catch (e) {
+                            console.error('[MSE] Queue appendBuffer failed:', e);
+                            pendingQueue = [];
+                            appending = false;
+                        }
+                    }
+                });
+                sourceBuffer.addEventListener('error', function (e) {
+                    console.error('[MSE] SourceBuffer error event:', e.type, 'sb.updating=' + (sourceBuffer ? sourceBuffer.updating : 'null'), 'ms.readyState=' + (mediaSource ? mediaSource.readyState : 'null'));
+                });
+
+                var init = buildInitSegment(sps, pps, trackId);
+                console.log('[MSE] Appending init segment, size=' + init.byteLength);
+                console.log('[MSE] Init hex (full ' + init.byteLength + ' bytes):', Array.from(init).map(function(b) { return b.toString(16).padStart(2, '0'); }).join(' '));
+                appendToSourceBuffer(init);
+                initSent = true;
+            }
+
+            if (!initSent) {
+                if (frameCount === 0) console.log('[MSE] Waiting for SPS+PPS... got NALU types:', nalus.map(function(n){return naluType(n);}).join(','));
+                return;
+            }
+
+            if (frameNalus.length === 0) return;
+
+            // Create and send fragment
+            var frag = buildFragment(frameNalus, isIDR, sequenceNumber++, baseDecodeTime, trackId, frameDuration);
+            if (frameCount === 0) {
+                console.log('[MSE] Frag hex (first 120):', Array.from(frag.slice(0, 120)).map(function(b) { return b.toString(16).padStart(2, '0'); }).join(' '));
+            }
+            baseDecodeTime += frameDuration;
+            frameCount++;
+            appendToSourceBuffer(frag);
+
+            if (frameCount <= 3) {
+                console.log('[MSE] Frame #' + frameCount + ' isIDR=' + isIDR + ' nalus=' + frameNalus.length + ' fragSize=' + frag.byteLength + ' dts=' + (baseDecodeTime - frameDuration));
+            }
+
+            // Update UI
+            if (frameCount <= 2) {
+                hidePlaceholder();
+                setBadgeText(t('camera.live'), true);
+                state.msePlaying = true;
+            }
+            lastFrameTime = Date.now();
+        }
+
+        function connectWs() {
+            if (destroyed) return;
+            setBadgeText(t('camera.connecting'), false);
+
+            var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            var url = proto + '//' + location.host + '/api/stream/ws?token=' + encodeURIComponent(state.token);
+
+            try {
+                ws = new WebSocket(url);
+            } catch (e) {
+                scheduleReconnect();
+                return;
+            }
+
+            ws.binaryType = 'arraybuffer';
+
+            ws.onopen = function () {
+                setBadgeText(t('camera.connecting'), false);
+            };
+
+            ws.onmessage = function (evt) {
+                handleData(evt.data);
+            };
+
+            ws.onclose = function () {
+                setBadgeText(t('status.disconnected'), false);
+                if (!destroyed) scheduleReconnect();
+            };
+
+            ws.onerror = function () { /* close fires after this */ };
+        }
+
+        function scheduleReconnect() {
+            if (destroyed) return;
+            reconnectAttempts++;
+            var delay = Math.min(MSE_RECONNECT_DELAY * Math.min(reconnectAttempts, 5), 10000);
+            setBadgeText(t('status.reconnecting'), false);
+            if (reconnectTimer) clearTimeout(reconnectTimer);
+            reconnectTimer = setTimeout(function () {
+                if (!destroyed) connectWs();
+            }, delay);
+        }
+
+        function destroy() {
+            if (destroyed) return;
+            destroyed = true;
+            state.mseActive = false;
+            state.msePlaying = false;
+            cleanupState();
+            showPlaceholder();
+            setBadgeText('\u2014', false);
+            video.removeAttribute('src');
+        }
+
+        msePlayer = {
+            destroy: destroy
+        };
+
+        // Create MediaSource
+        try {
+            mediaSource = new MediaSource();
+            video.src = URL.createObjectURL(mediaSource);
+        } catch (e) {
+            setBadgeText('MSE init error', false);
+            state.mseActive = false;
+            return;
+        }
+
+        mediaSource.addEventListener('sourceopen', function () {
+            if (destroyed) return;
+            console.log('[MSE] sourceopen — connecting WebSocket');
+            connectWs();
+        });
+
+        video.addEventListener('error', function (e) {
+            var err = e.target.error;
+            console.error('[MSE] Video element error: code=' + err.code + ' message="' + (err.message || '') + '"');
+        });
+    }
+
+    function destroyMsePlayer() {
+        if (msePlayer) {
+            msePlayer.destroy();
+            msePlayer = null;
+        }
     }
 
     /* ======================================================================
@@ -1654,7 +2112,7 @@
     }
 
     /* ======================================================================
-       WebSocket
+       WebSocket (Control Channel)
        ====================================================================== */
 
     function connectWS() {
@@ -1684,15 +2142,6 @@
             state.ws = null;
         }
         clearTimeout(state.wsReconnectTimer);
-        /* Clear camera timers on disconnect */
-        if (state.snapshotTimer) {
-            clearInterval(state.snapshotTimer);
-            state.snapshotTimer = null;
-        }
-        if (state.metaTimer) {
-            clearInterval(state.metaTimer);
-            state.metaTimer = null;
-        }
     }
 
     function scheduleReconnect() {
@@ -1822,16 +2271,9 @@
         applyI18n();
         connectWS();
 
-        /* Clean up all timers on page close to prevent memory leaks */
+        /* Clean up on page close */
         window.addEventListener('beforeunload', function () {
-            if (state.snapshotTimer) {
-                clearInterval(state.snapshotTimer);
-                state.snapshotTimer = null;
-            }
-            if (state.metaTimer) {
-                clearInterval(state.metaTimer);
-                state.metaTimer = null;
-            }
+            destroyMsePlayer();
             closeWS();
         });
     }

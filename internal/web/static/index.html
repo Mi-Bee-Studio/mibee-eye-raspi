@@ -194,25 +194,24 @@
                 <section id="tab-camera" class="tab-panel" aria-labelledby="page-title" hidden>
 
                     <!-- Live Preview -->
-                    <article class="card card-snapshot">
+                    <article class="card card-video">
                         <header class="card-head">
                             <div>
                                 <h2 class="card-title" data-i18n="camera.preview">Live Preview</h2>
-                                <p class="card-sub" data-i18n="camera.previewSub">HLS live stream, ~3s latency.</p>
+                                <p class="card-sub" data-i18n="camera.previewSub">Live video over WebSocket.</p>
                             </div>
                             <div class="card-head-actions">
-                                <span class="snapshot-meta" id="snapshot-meta" aria-live="polite">—</span>
+                                <span class="live-badge" id="live-badge" aria-live="polite">&mdash;</span>
                             </div>
                         </header>
-                        <div class="snapshot-wrap">
+                        <div class="video-wrap">
                             <video id="live-video" class="live-video" autoplay muted playsinline aria-label="Camera live stream"></video>
-                            <img id="snapshot" class="snapshot-img" alt="" aria-label="Camera JPEG snapshot fallback" hidden>
-                            <div id="snapshot-placeholder" class="snapshot-placeholder">
+                            <div id="video-placeholder" class="video-placeholder">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="placeholder-icon">
                                     <path d="M3 8h3l2-2h8l2 2h3v11H3z"/>
                                     <circle cx="12" cy="13" r="4"/>
                                 </svg>
-                                <span data-i18n="camera.noSnapshot">No snapshot available</span>
+                                <span data-i18n="camera.connecting">Connecting&hellip;</span>
                             </div>
                         </div>
                     </article>
@@ -408,7 +407,6 @@
     <!-- ========== Toast Container ========== -->
     <div id="toast-stack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
 
-        <script src="/static/hls.min.js"></script>
         <script src="/static/app.js"></script>
 </body>
 </html>
