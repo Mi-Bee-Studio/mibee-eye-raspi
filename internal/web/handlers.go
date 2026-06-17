@@ -23,19 +23,31 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	cameraSection := map[string]interface{}{
+		"device":     oc.CameraDevice(),
+		"width":      oc.CameraWidth(),
+		"height":     oc.CameraHeight(),
+		"fps":        oc.CameraFPS(),
+		"codec":      oc.CameraCodec(),
+		"bitrate":    oc.CameraBitrate(),
+	}
+
+	// Overlay live params from ParamManager when available.
+	if s.cfg.Params != nil {
+		for name := range camera.ParamRanges {
+			if val, err := s.cfg.Params.Get(name); err == nil {
+				cameraSection[name] = val
+			}
+		}
+		for name := range camera.ParamEnums {
+			if val, err := s.cfg.Params.Get(name); err == nil {
+				cameraSection[name] = val
+			}
+		}
+	}
+
 	config := map[string]interface{}{
-		"camera": map[string]interface{}{
-			"device":     "/dev/video0",
-			"width":      1280,
-			"height":     720,
-			"fps":        15,
-			"codec":      "h264",
-			"bitrate":    2000000,
-			"brightness": 0.0,
-			"contrast":   1.0,
-			"saturation": 1.0,
-			"sharpness":  1.0,
-		},
+		"camera": cameraSection,
 		"rtsp": map[string]interface{}{
 			"port":     oc.RTSPPort(),
 			"username": "",
@@ -47,19 +59,19 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 			"password": maskPassword(oc.ONVIFPassword()),
 		},
 		"rtmp": map[string]interface{}{
-			"enabled": false,
-			"url":     "",
+			"enabled": oc.RTMPEnabled(),
+			"url":     oc.RTMPURL(),
 		},
 		"device": map[string]interface{}{
-			"name":           "Pi Camera V1",
-			"manufacturer":   "Raspberry Pi",
-			"model":          "OV5647",
-			"firmware":       "1.0.0",
-			"hardware_id":    "OV5647",
-			"serial_number": "",
+			"name":           oc.DeviceName(),
+			"manufacturer":   oc.DeviceManufacturer(),
+			"model":          oc.DeviceModel(),
+			"firmware":       oc.DeviceFirmware(),
+			"hardware_id":    oc.DeviceHardwareID(),
+			"serial_number":  oc.DeviceSerialNumber(),
 		},
 		"logging": map[string]interface{}{
-			"level": "info",
+			"level": oc.LoggingLevel(),
 		},
 		"web": map[string]interface{}{
 			"enabled":  true,
@@ -67,24 +79,6 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 			"username": s.username,
 			"password": maskPassword(s.password),
 		},
-	}
-
-	// Override camera params from ParamManager if available.
-	if s.cfg.Params != nil {
-		cam := map[string]interface{}{}
-		for name := range camera.ParamRanges {
-			if val, err := s.cfg.Params.Get(name); err == nil {
-				cam[name] = val
-			}
-		}
-		for name := range camera.ParamEnums {
-			if val, err := s.cfg.Params.Get(name); err == nil {
-				cam[name] = val
-			}
-		}
-		if len(cam) > 0 {
-			config["camera"] = cam
-		}
 	}
 
 	writeJSON(w, http.StatusOK, config)
@@ -467,4 +461,47 @@ func (s *Server) handleDeletePTZPreset(w http.ResponseWriter, r *http.Request) {
 
 	s.logger.Printf("web: PTZ preset removed %s", token)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handlePutPTZPreset renames an existing preset.
+func (s *Server) handlePutPTZPreset(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.PTZ == nil {
+		writeError(w, http.StatusInternalServerError, "PTZ not available")
+		return
+	}
+
+	token := extractPresetToken(r)
+	if token == "" {
+		writeError(w, http.StatusBadRequest, "preset token is required")
+		return
+	}
+
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
+		return
+	}
+
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "preset name is required")
+		return
+	}
+
+	if err := s.cfg.PTZ.RenamePreset(token, req.Name); err != nil {
+		if err == ptz.ErrPresetNotFound {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("preset %s not found", token))
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.logger.Printf("web: PTZ preset renamed token=%s name=%s", token, req.Name)
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"ok":    true,
+		"token": token,
+		"name":  req.Name,
+	})
 }

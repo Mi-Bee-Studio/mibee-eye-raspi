@@ -18,13 +18,28 @@ import (
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/ptz"
 )
 
-// OnvifConfigProvider provides read-only access to ONVIF and RTSP configuration.
+// OnvifConfigProvider provides read-only access to ONVIF, RTSP, device, and camera configuration.
 type OnvifConfigProvider interface {
 	ONVIFPort() int
 	ONVIFUsername() string
 	ONVIFPassword() string
 	RTSPPort() int
 	DeviceIP() string
+	CameraDevice() string
+	CameraCodec() string
+	CameraBitrate() int
+	CameraWidth() int
+	CameraHeight() int
+	CameraFPS() int
+	DeviceName() string
+	DeviceManufacturer() string
+	DeviceModel() string
+	DeviceFirmware() string
+	DeviceHardwareID() string
+	DeviceSerialNumber() string
+	LoggingLevel() string
+	RTMPEnabled() bool
+	RTMPURL() string
 }
 
 // Config holds the web server configuration.
@@ -188,6 +203,7 @@ func (s *Server) registerRoutes() {
 	m.HandleFunc("POST /api/ptz/preset", s.authRequired(s.handlePostPTZPreset))
 	m.HandleFunc("POST /api/ptz/preset/goto", s.authRequired(s.handlePostPTZPresetGoto))
 	m.HandleFunc("DELETE /api/ptz/preset/{token}", s.authRequired(s.handleDeletePTZPreset))
+	m.HandleFunc("PUT /api/ptz/preset/{token}", s.authRequired(s.handlePutPTZPreset))
 	m.HandleFunc("GET /api/snapshot", s.authRequired(s.handleGetSnapshot))
 	// HLS live stream — manifest requires auth; segments are open (short-lived,
 

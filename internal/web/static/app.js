@@ -126,7 +126,19 @@
             'toast.presetAdd': { title: 'Preset error', msg: 'Add preset error: {err}' },
             'toast.presetGoto': { title: 'Goto error', msg: 'Goto preset error: {err}' },
             'toast.presetDelete': { title: 'Delete error', msg: 'Delete preset error: {err}' },
-            'toast.saved': { title: 'Saved', msg: 'Settings updated, restarting…', kind: 'success' }
+            'toast.saved': { title: 'Saved', msg: 'Settings updated, restarting…', kind: 'success' },
+
+            'errors.loadFailed': 'Failed to load',
+            'errors.retry': 'Retry',
+            'errors.networkError': 'Network error',
+
+            'camera.resetDefaults': 'Reset Defaults',
+            'camera.resetConfirm': 'Reset all imaging parameters to defaults?',
+
+            'modal.confirmOnvifSave': 'This will restart the server. Continue?',
+            'modal.confirmPresetDelete': 'Are you sure you want to delete this preset?',
+
+            'ptz.renamePreset': 'Rename'
         },
 
         zh: {
@@ -223,7 +235,19 @@
             'toast.presetAdd': { title: '预置位错误', msg: '添加预置位失败：{err}' },
             'toast.presetGoto': { title: '调用错误', msg: '调用预置位失败：{err}' },
             'toast.presetDelete': { title: '删除错误', msg: '删除预置位失败：{err}' },
-            'toast.saved': { title: '已保存', msg: '设置已更新，正在重启…', kind: 'success' }
+            'toast.saved': { title: '已保存', msg: '设置已更新，正在重启…', kind: 'success' },
+
+            'errors.loadFailed': '加载失败',
+            'errors.retry': '重试',
+            'errors.networkError': '网络错误',
+
+            'camera.resetDefaults': '重置默认值',
+            'camera.resetConfirm': '确定要将所有图像参数重置为默认值吗？',
+
+            'modal.confirmOnvifSave': '此操作将重启服务器，确定继续吗？',
+            'modal.confirmPresetDelete': '确定要删除此预置位吗？',
+
+            'ptz.renamePreset': '重命名'
         }
     };
 
@@ -245,6 +269,7 @@
         snapshotFailures: 0,
         hlsInstance: null,
         videoPlaying: false,
+        snapshotInitialized: false,
     };
 
     /* ======================================================================
@@ -276,6 +301,28 @@
             });
         }
         return e;
+    }
+
+    function renderSkeleton(container, lines) {
+        if (!container) return;
+        var sk = el('div', { className: 'skeleton' });
+        (lines || 3).forEach(function () {
+            sk.appendChild(el('div', { className: 'skeleton-line' }));
+        });
+        container.innerHTML = '';
+        container.appendChild(sk);
+    }
+
+    function renderErrorState(container, msg, retryFn) {
+        if (!container) return;
+        container.innerHTML = '';
+        var state = el('div', { className: 'error-state' });
+        state.appendChild(el('div', { className: 'error-icon', innerHTML: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M15 9l-6 6M9 9l6 6"/></svg>' }));
+        state.appendChild(el('div', { className: 'error-msg', textContent: msg || t('errors.loadFailed') }));
+        if (retryFn) {
+            state.appendChild(el('button', { className: 'btn btn-sm btn-ghost', textContent: t('errors.retry'), onClick: retryFn }));
+        }
+        container.appendChild(state);
     }
 
     /* ======================================================================
@@ -640,8 +687,16 @@
             pageTitle.textContent = t(tab === 'camera' ? 'nav.camera' : 'nav.server');
         }
         if (tab === 'camera') {
+            if (!state.snapshotInitialized) {
+                state.snapshotInitialized = true;
+                initSnapshot();
+            }
             if (!state.imagingRendered) loadImaging();
             if (!state.ptzRendered) loadPTZ();
+            /* Restart HLS if it was destroyed by leaving the tab */
+            if (!state.hlsInstance && !state.videoPlaying) {
+                initLiveVideo();
+            }
             /* Restart snapshot/meta timers when entering camera tab */
             if (!state.snapshotTimer) {
                 refreshSnapshot();
@@ -695,15 +750,7 @@
         }
 
         var stack = $('#toast-stack');
-        if (!stack) {
-            var t0 = $('#toast');
-            if (t0) {
-                t0.textContent = title + (msg ? ': ' + msg : '');
-                t0.classList.remove('hidden');
-                setTimeout(function () { t0.classList.add('hidden'); }, duration);
-            }
-            return;
-        }
+        if (!stack) return;
 
         var node = el('div', { className: 'toast toast-' + kind, role: 'status' });
         var iconSvg = {
@@ -751,9 +798,11 @@
        ====================================================================== */
 
     function loadConfig() {
+        var grid = $('#server-config');
+        renderSkeleton(grid, 4);
         api('GET', '/api/config').then(renderConfig).catch(function (err) {
             if (err.status !== 401) {
-                showToast('toast.configLoad', { err: err.message });
+                renderErrorState(grid, t('toast.configLoad', { err: err.message }).msg, loadConfig);
             }
         });
     }
@@ -875,7 +924,7 @@
                 return;
             }
 
-            var confirmMsg = state.lang === 'zh' ? '此操作将重启服务器，确定继续吗？' : 'This will restart the server. Continue?';
+            var confirmMsg = t('modal.confirmOnvifSave');
             showConfirmModal(confirmMsg).then(function () {
                 btnSave.classList.add('is-loading');
                 btnSave.disabled = true;
@@ -987,6 +1036,8 @@
         var img = $('#snapshot');
         var placeholder = $('#snapshot-placeholder');
 
+        video.style.display = 'none';
+
         function onPlaying() {
             // HLS stream is up — hide JPEG snapshot, show video, mark live.
             if (img) img.hidden = true;
@@ -996,6 +1047,15 @@
             state.snapshotLoadTime = Date.now();
             state.snapshotFailures = 0;
             updateSnapshotMeta();
+            // Stop snapshot polling while HLS is active.
+            if (state.snapshotTimer) {
+                clearInterval(state.snapshotTimer);
+                state.snapshotTimer = null;
+            }
+            if (state.metaTimer) {
+                clearInterval(state.metaTimer);
+                state.metaTimer = null;
+            }
         }
 
         function fallbackToSnapshot() {
@@ -1007,6 +1067,12 @@
                 state.hlsInstance = null;
             }
             state.videoPlaying = false;
+            // Restart snapshot polling for fallback mode.
+            if (!state.snapshotTimer) {
+                refreshSnapshot();
+                state.snapshotTimer = setInterval(refreshSnapshot, SNAPSHOT_INTERVAL);
+                state.metaTimer = setInterval(updateSnapshotMeta, 1000);
+            }
             // If we have never loaded a JPEG, trigger one now.
             if (img && !img.src) refreshSnapshot();
         }
@@ -1096,6 +1162,8 @@
        ====================================================================== */
 
     function loadImaging() {
+        var container = $('#imaging-controls');
+        renderSkeleton(container, 6);
         Promise.all([
             api('GET', '/api/camera/params'),
             api('GET', '/api/camera/options')
@@ -1103,7 +1171,7 @@
             renderImaging(results[0] || {}, results[1] || {});
         }).catch(function (err) {
             if (err.status !== 401) {
-                showToast('toast.imagingLoad', { err: err.message });
+                renderErrorState(container, t('toast.imagingLoad', { err: err.message }).msg, loadImaging);
             }
         });
     }
@@ -1130,11 +1198,12 @@
             var max = range.max !== undefined ? range.max : cfg.fallbackMax;
             var step = range.step !== undefined ? range.step : cfg.fallbackStep;
             var label = t(cfg.key);
+            var sliderId = 'imaging-' + cfg.name.toLowerCase();
 
             var wrap = el('div', { className: 'param-control' });
 
             var header = el('div', { className: 'param-header' });
-            header.appendChild(el('span', { className: 'param-label', textContent: label }));
+            header.appendChild(el('label', { className: 'param-label', textContent: label, 'for': sliderId }));
             var valSpan = el('span', { className: 'param-value mono', textContent: formatNumber(current, step) });
             header.appendChild(valSpan);
             wrap.appendChild(header);
@@ -1142,6 +1211,7 @@
             var slider = el('input', {
                 className: 'param-slider',
                 type: 'range',
+                id: sliderId,
                 min: String(min),
                 max: String(max),
                 step: String(step),
@@ -1207,9 +1277,10 @@
 
     function buildSelect(label, name, current, enums) {
         var wrap = el('div', { className: 'param-control' });
-        wrap.appendChild(el('span', { className: 'param-label', textContent: label }));
+        var selId = 'imaging-' + name.toLowerCase();
+        wrap.appendChild(el('label', { className: 'param-label', textContent: label, 'for': selId }));
 
-        var sel = el('select', { className: 'param-select', 'data-param': name });
+        var sel = el('select', { className: 'param-select', id: selId, 'data-param': name });
         enums.forEach(function (opt) {
             var o = el('option', { value: opt, textContent: opt });
             if (opt === current) o.selected = true;
@@ -1234,6 +1305,36 @@
                 }
             });
         }, 150);
+    }
+
+    function resetImagingDefaults() {
+        showConfirmModal(t('camera.resetConfirm')).then(function () {
+            var defaults = {
+                'Brightness': 0,
+                'Contrast': 1,
+                'Saturation': 1,
+                'Sharpness': 1,
+                'AWBMode': 'auto',
+                'ExposureMode': 'normal',
+                'HFlip': 0,
+                'VFlip': 0
+            };
+            var names = Object.keys(defaults);
+            var i = 0;
+            function next() {
+                if (i >= names.length) {
+                    loadImaging();
+                    return;
+                }
+                var name = names[i];
+                var value = defaults[name];
+                i++;
+                api('POST', '/api/camera/param', { name: name, value: value })
+                    .then(next)
+                    .catch(function () { next(); });
+            }
+            next();
+        }).catch(function () { /* cancelled */ });
     }
 
     function flashValue(wrap) {
@@ -1261,7 +1362,9 @@
 
     function loadPTZ() {
         state.ptzRendered = true;
-        api('GET', '/api/ptz/status').then(updatePTZDisplay).catch(function () { /* WS will update */ });
+        api('GET', '/api/ptz/status').then(updatePTZDisplay).catch(function () {
+            /* WS will update — no error state needed for PTZ readout */
+        });
         loadPresets();
     }
 
@@ -1407,8 +1510,14 @@
        ====================================================================== */
 
     function loadPresets() {
-        api('GET', '/api/ptz/presets').then(renderPresets).catch(function () {
-            renderPresets([]);
+        var container = $('#preset-list');
+        renderSkeleton(container, 2);
+        api('GET', '/api/ptz/presets').then(renderPresets).catch(function (err) {
+            if (err.status !== 401) {
+                renderErrorState(container, t('errors.loadFailed'), loadPresets);
+            } else {
+                renderPresets([]);
+            }
         });
     }
 
@@ -1427,10 +1536,16 @@
         }
 
         presets.forEach(function (p) {
-            var row = el('div', { className: 'preset-row' });
+            var row = el('div', { className: 'preset-row', role: 'listitem' });
 
             var info = el('div', { className: 'preset-info' });
-            info.appendChild(el('span', { className: 'preset-name', textContent: p.name || (t('ptz.presetName') + ' ' + p.token) }));
+            var nameSpan = el('span', { className: 'preset-name', textContent: p.name || (t('ptz.presetName') + ' ' + p.token) });
+            nameSpan.style.cursor = 'pointer';
+            nameSpan.title = t('ptz.renamePreset');
+            nameSpan.addEventListener('dblclick', function () {
+                startRenamePreset(row, p.token, nameSpan);
+            });
+            info.appendChild(nameSpan);
 
             var posText = 'Token: ' + p.token;
             if (p.position) {
@@ -1459,6 +1574,46 @@
         });
     }
 
+    function startRenamePreset(row, token, nameSpan) {
+        var currentName = nameSpan.textContent;
+        var input = el('input', {
+            className: 'form-input',
+            type: 'text',
+            value: currentName,
+            style: 'font-size:13px;padding:4px 8px;width:100%;'
+        });
+        nameSpan.replaceWith(input);
+        input.focus();
+        input.select();
+
+        function save() {
+            var newName = input.value.trim();
+            if (newName && newName !== currentName) {
+                renamePreset(token, newName);
+            } else {
+                nameSpan.textContent = currentName;
+                input.replaceWith(nameSpan);
+            }
+        }
+
+        input.addEventListener('blur', save);
+        input.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter') { e.preventDefault(); save(); }
+            if (e.key === 'Escape') { input.value = currentName; save(); }
+        });
+    }
+
+    function renamePreset(token, newName) {
+        api('PUT', '/api/ptz/preset/' + encodeURIComponent(token), { name: newName })
+            .then(loadPresets)
+            .catch(function (err) {
+                if (err.status !== 401) {
+                    showToast('toast.presetAdd', { err: err.message }, { kind: 'error' });
+                    loadPresets();
+                }
+            });
+    }
+
     function addPreset() {
         var count = $$('#preset-list .preset-row').length;
         api('POST', '/api/ptz/preset', { name: t('ptz.presetName') + ' ' + (count + 1) })
@@ -1479,7 +1634,7 @@
     }
 
     function deletePreset(token) {
-        var confirmMsg = state.lang === 'zh' ? '确定要删除此预置位吗？' : 'Are you sure you want to delete this preset?';
+        var confirmMsg = t('modal.confirmPresetDelete');
         showConfirmModal(confirmMsg).then(function () {
             api('DELETE', '/api/ptz/preset/' + encodeURIComponent(token))
                 .then(loadPresets)
@@ -1494,6 +1649,8 @@
     function initPresetControls() {
         var btn = $('#btn-add-preset');
         if (btn) btn.addEventListener('click', addPreset);
+        var resetBtn = $('#btn-reset-imaging');
+        if (resetBtn) resetBtn.addEventListener('click', resetImagingDefaults);
     }
 
     /* ======================================================================
@@ -1581,6 +1738,9 @@
             case 'preset-list-changed':
                 loadPresets();
                 break;
+            case 'ptz-preset-added':
+                loadPresets();
+                break;
         }
     }
 
@@ -1658,10 +1818,6 @@
 
 		fetchVersion();
         loadConfig();
-        initSnapshot();
-        initLiveVideo();
-        loadImaging();
-        loadPTZ();
 
         applyI18n();
         connectWS();

@@ -231,17 +231,13 @@ func (s *Server) sendInitialState(client *wsClient) {
 
 	// Send preset list.
 	if s.cfg.PTZ != nil {
-		tokens := s.cfg.PTZ.GetPresets()
-		for _, token := range tokens {
-			pos, err := s.cfg.PTZ.GetPresetPosition(token)
-			if err != nil {
-				continue
-			}
+		presets := s.cfg.PTZ.ListPresets()
+		for _, p := range presets {
 			msg, _ := json.Marshal(map[string]interface{}{
 				"type":     "ptz-preset-added",
-				"token":    token,
-				"name":     token,
-				"position": pos,
+				"token":    p.Token,
+				"name":     p.Name,
+				"position": p.Position,
 			})
 			client.writeMT(websocket.TextMessage, msg)
 		}

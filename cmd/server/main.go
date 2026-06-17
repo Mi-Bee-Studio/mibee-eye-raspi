@@ -35,15 +35,26 @@ type configAdapter struct {
 	deviceIP string
 }
 
-func (a *configAdapter) ONVIFUsername() string { return a.cfg.ONVIF.Username }
-func (a *configAdapter) ONVIFPassword() string { return a.cfg.ONVIF.Password }
-func (a *configAdapter) ONVIFPort() int        { return a.cfg.ONVIF.Port }
-func (a *configAdapter) RTSPPort() int         { return a.cfg.RTSP.Port }
-func (a *configAdapter) DeviceIP() string      { return a.deviceIP }
-func (a *configAdapter) CameraWidth() int      { return a.cfg.Camera.Width }
-func (a *configAdapter) CameraHeight() int     { return a.cfg.Camera.Height }
-func (a *configAdapter) CameraFPS() int        { return a.cfg.Camera.FPS }
-func (a *configAdapter) CameraBitrate() int    { return a.cfg.Camera.Bitrate }
+func (a *configAdapter) ONVIFUsername() string      { return a.cfg.ONVIF.Username }
+func (a *configAdapter) ONVIFPassword() string      { return a.cfg.ONVIF.Password }
+func (a *configAdapter) ONVIFPort() int             { return a.cfg.ONVIF.Port }
+func (a *configAdapter) RTSPPort() int              { return a.cfg.RTSP.Port }
+func (a *configAdapter) DeviceIP() string           { return a.deviceIP }
+func (a *configAdapter) CameraDevice() string       { return a.cfg.Camera.Device }
+func (a *configAdapter) CameraCodec() string        { return a.cfg.Camera.Codec }
+func (a *configAdapter) CameraBitrate() int         { return a.cfg.Camera.Bitrate }
+func (a *configAdapter) CameraWidth() int           { return a.cfg.Camera.Width }
+func (a *configAdapter) CameraHeight() int          { return a.cfg.Camera.Height }
+func (a *configAdapter) CameraFPS() int             { return a.cfg.Camera.FPS }
+func (a *configAdapter) DeviceName() string         { return a.cfg.Device.Name }
+func (a *configAdapter) DeviceManufacturer() string { return a.cfg.Device.Manufacturer }
+func (a *configAdapter) DeviceModel() string        { return a.cfg.Device.Model }
+func (a *configAdapter) DeviceFirmware() string     { return a.cfg.Device.Firmware }
+func (a *configAdapter) DeviceHardwareID() string   { return a.cfg.Device.HardwareID }
+func (a *configAdapter) DeviceSerialNumber() string { return a.cfg.Device.SerialNumber }
+func (a *configAdapter) LoggingLevel() string       { return a.cfg.Logging.Level }
+func (a *configAdapter) RTMPEnabled() bool          { return a.cfg.RTMP.Enabled }
+func (a *configAdapter) RTMPURL() string            { return a.cfg.RTMP.URL }
 
 // detectLocalIP finds the first non-loopback IPv4 address.
 func detectLocalIP() string {

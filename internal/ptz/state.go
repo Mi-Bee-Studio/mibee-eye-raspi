@@ -278,6 +278,25 @@ func (s *State) SetPreset(token string, presetName string) error {
 	return nil
 }
 
+// RenamePreset changes a preset's name without modifying its position.
+func (s *State) RenamePreset(token string, newName string) error {
+	s.mu.Lock()
+	preset, ok := s.presets[token]
+	if !ok {
+		s.mu.Unlock()
+		return ErrPresetNotFound
+	}
+	preset.Name = newName
+	s.presets[token] = preset
+	cb := s.onPresetChange
+	s.mu.Unlock()
+
+	if cb != nil {
+		cb()
+	}
+	return nil
+}
+
 // GetPresets returns list of preset tokens.
 func (s *State) GetPresets() []string {
 	s.mu.RLock()
