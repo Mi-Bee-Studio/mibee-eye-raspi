@@ -169,13 +169,9 @@ func writeSOAPFault(w http.ResponseWriter, faultCode, reason string, httpStatus 
 }
 
 // isAuthRequired returns true if the ONVIF action requires authentication.
-// Write operations (Set, Remove, Create, Go prefix, plus explicit PTZ moves and Stop)
-// require valid WS-UsernameToken credentials. Read operations are open.
+// Write operations (Set, Remove, Create, Go prefix) require valid
+// WS-UsernameToken credentials. Read operations are open.
 func isAuthRequired(action string) bool {
-	switch action {
-	case "ContinuousMove", "AbsoluteMove", "RelativeMove", "Stop":
-		return true
-	}
 	if strings.HasPrefix(action, "Set") || strings.HasPrefix(action, "Remove") ||
 		strings.HasPrefix(action, "Create") || strings.HasPrefix(action, "Go") {
 		return true

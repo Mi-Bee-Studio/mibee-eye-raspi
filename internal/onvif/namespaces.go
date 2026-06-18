@@ -7,7 +7,6 @@ const (
 	WSUNS         = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd"
 	ONVIFDeviceNS = "http://www.onvif.org/ver10/device/wsdl"
 	ONVIFMediaNS  = "http://www.onvif.org/ver10/media/wsdl"
-	ONVIFPTZNS    = "http://www.onvif.org/ver20/ptz/wsdl"
 	ONVIFImgNS    = "http://www.onvif.org/ver20/imaging/wsdl"
 	SchemaNS      = "http://www.onvif.org/ver10/schema"
 )

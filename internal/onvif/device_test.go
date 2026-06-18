@@ -210,9 +210,6 @@ func TestDeviceGetCapabilities(t *testing.T) {
 	if !strings.Contains(body, "http://192.168.1.100:8080/onvif/device_service") {
 		t.Errorf("response missing Device XAddr with server IP: %s", body)
 	}
-	if !strings.Contains(body, "http://192.168.1.100:8080/onvif/ptz_service") {
-		t.Errorf("response missing PTZ XAddr with server IP: %s", body)
-	}
 	if !strings.Contains(body, "tt:Imaging") {
 		t.Errorf("response missing tt:Imaging in Capabilities: %s", body)
 	}
@@ -284,9 +281,6 @@ func TestDeviceGetServices(t *testing.T) {
 	}
 	if !strings.Contains(body, "http://www.onvif.org/ver10/media/wsdl") {
 		t.Errorf("response missing Media namespace: %s", body)
-	}
-	if !strings.Contains(body, "http://www.onvif.org/ver20/ptz/wsdl") {
-		t.Errorf("response missing PTZ namespace: %s", body)
 	}
 	if !strings.Contains(body, "http://www.onvif.org/ver20/imaging/wsdl") {
 		t.Errorf("response missing Imaging namespace: %s", body)
