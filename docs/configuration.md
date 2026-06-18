@@ -30,6 +30,9 @@ Camera capture settings control how video frames are captured from the camera de
 
 ```yaml
 camera:
+  # Capture mode: "mtxrpicam" (default, uses subprocess) or "rtsp" (consumes external RTSP URL)
+  mode: mtxrpicam
+
   # Path to mtxrpicam binary (camera capture subprocess)
   # This binary and its bundled libcamera libraries must be present at this path
   bin_path: deploy/bin/mtxrpicam
@@ -64,6 +67,18 @@ camera:
   
   # Sharpness: 0.0 to 16.0 (1.0 = default)
   sharpness: 1.0
+  
+  # External RTSP URL when mode=rtsp (ignored when mode=mtxrpicam)
+  rtsp_url: ""
+  
+  # Keyframe interval (1=every frame, 15=every 15th frame)
+  idr_period: 15
+  
+  # Frame channel buffer capacity (frames)
+  frame_buffer_size: 30
+  
+  # Maximum subprocess restart backoff duration
+  max_backoff: 30s
 ```
 
 ### RTSP Configuration
@@ -79,6 +94,21 @@ rtsp:
   # Leave empty strings for no authentication
   username: ""
   password: ""
+  
+  # AUHub subscriber channel buffer size
+  subscriber_buffer_size: 64
+  
+  # gortsplib write queue size (256 default too small for WiFi)
+  write_queue_size: 2048
+  
+  # Enable UDP transport (needed for NVR clients)
+  enable_udp: true
+  
+  # UDP RTP port (default: 8000)
+  udp_rtp_port: 8000
+  
+  # UDP RTCP port (default: 8001)
+  udp_rtcp_port: 8001
 ```
 
 ### ONVIF Configuration
@@ -115,6 +145,16 @@ web:
   # Uses ONVIF credentials when username/password are empty
   username: "admin"
   password: ""
+  
+  # CORS allowed origins (use specific origins in production)
+  allowed_origins:
+    - "*"
+  
+  # HTTP server timeouts
+  read_header_timeout: 5s
+  read_timeout: 10s
+  write_timeout: 30s
+  idle_timeout: 120s
 ```
 
 
@@ -129,10 +169,13 @@ rtmp:
   enabled: false
   
   # RTMP push URL for cloud services
-  # Examples: 
+  # Examples:
   # - rtmp://push-server/app/stream
   # - rtmp://live.twitch.tv/app/channel-key
   url: "rtmp://push-server/app/stream"
+  
+  # Maximum reconnection attempts (0 = unlimited)
+  max_retries: 10
 ```
 
 ### Device Configuration
@@ -174,11 +217,59 @@ logging:
   level: "info"
 ```
 
+### Snapshot Configuration
+
+Snapshot endpoint settings for JPEG/H.264 capture via HTTP.
+
+```yaml
+snapshot:
+  # Enable the snapshot endpoint (default: true)
+  enabled: true
+
+  # JPEG quality 1-100 (only used for rpicam-still subprocess; H.264 IDR fallback ignores this)
+  quality: 85
+```
+
+The snapshot endpoint uses a dual-tier strategy:
+1. **Tier 1**: `rpicam-still` subprocess captures a real JPEG when the camera is idle
+2. **Tier 2**: Falls back to the stored H.264 IDR frame (returned as `video/H264`) when the camera pipeline is busy
+
+### Metrics Configuration
+
+Prometheus metrics exporter settings.
+
+```yaml
+metrics:
+  # Enable the metrics HTTP endpoint (default: true)
+  enabled: true
+
+  # Metrics HTTP server port (default: 9100)
+  # NOTE: 9100 conflicts with Prometheus node_exporter — change port or disable if both run on same host
+  port: 9100
+```
+
+### HLS Configuration
+
+HLS live streaming settings for browser playback.
+
+```yaml
+hls:
+  # Enable HLS server (default: false)
+  enabled: false
+
+  # Target segment duration (default: 2s)
+  segment_duration: 2s
+```
+
+The HLS server uses a pure Go MPEG-TS segmenter — no ffmpeg subprocess. Segments are kept in-memory.
+
+
 ## Default Values Reference
 
 | Section | Field | Default Value | Type | Description |
 |---------|-------|---------------|------|-------------|
-| **camera** | bin_path | `"deploy/bin/mtxrpicam"` | string | Path to mtxrpicam binary |
+| **camera** | mode | `"mtxrpicam"` | string | Capture mode (mtxrpicam or rtsp) |
+| | bin_path | `"deploy/bin/mtxrpicam"` | string | Path to mtxrpicam binary |
 | | device | `/dev/video0` | string | Camera device path |
 | | width | `1280` | int | Capture width in pixels |
 | | height | `720` | int | Capture height in pixels |
@@ -189,25 +280,46 @@ logging:
 | | contrast | `1.0` | float | Contrast control |
 | | saturation | `1.0` | float | Saturation control |
 | | sharpness | `1.0` | float | Sharpness control |
+| | rtsp_url | `""` | string | External RTSP URL (when mode=rtsp) |
+| | idr_period | `15` | int | Keyframe interval |
+| | frame_buffer_size | `30` | int | Frame channel buffer capacity |
+| | max_backoff | `"30s"` | string | Maximum subprocess restart backoff |
 | **rtsp** | port | `8554` | int | RTSP server port |
 | | username | `""` | string | RTSP username |
 | | password | `""` | string | RTSP password |
+| | subscriber_buffer_size | `64` | int | AUHub subscriber channel buffer size |
+| | write_queue_size | `2048` | int | gortsplib write queue size |
+| | enable_udp | `true` | bool | Enable UDP transport |
+| | udp_rtp_port | `8000` | int | UDP RTP port |
+| | udp_rtcp_port | `8001` | int | UDP RTCP port |
 | **onvif** | port | `8080` | int | ONVIF HTTP port |
 | | username | `"admin"` | string | ONVIF username |
 | | password | `""` | string | ONVIF password |
-| **rtmp** | enabled | `false` | bool | Enable RTMP push |
-| | url | `"rtmp://push-server/app/stream"` | string | RTMP push URL |
 | **device** | name | `"Pi Camera V1"` | string | Friendly camera name |
 | | manufacturer | `"Raspberry Pi"` | string | Device manufacturer |
 | | model | `"OV5647"` | string | Camera sensor model |
 | | firmware | `"1.0.0"` | string | Firmware version |
 | | hardware_id | `"OV5647"` | string | Hardware identifier |
 | | serial_number | `""` | string | Device serial number |
+| **logging** | level | `"info"` | string | Log level |
 | **web** | enabled | `true` | bool | Enable Web UI |
-  | | port | `8088` | int | Web UI HTTP port |
-  | | username | `""` | string | Web UI username (defaults to onvif.username) |
-  | | password | `""` | string | Web UI password (defaults to onvif.password) |
-  | **logging** | level | `"info"` | string | Log level |
+| | port | `8088` | int | Web UI HTTP port |
+| | username | `""` | string | Web UI username (defaults to onvif.username) |
+| | password | `""` | string | Web UI password (defaults to onvif.password) |
+| | allowed_origins | `["*"]` | []string | CORS allowed origins |
+| | read_header_timeout | `"5s"` | string | HTTP read header timeout |
+| | read_timeout | `"10s"` | string | HTTP read timeout |
+| | write_timeout | `"30s"` | string | HTTP write timeout |
+| | idle_timeout | `"120s"` | string | HTTP idle timeout |
+| **metrics** | enabled | `true` | bool | Enable metrics endpoint |
+| | port | `9100` | int | Metrics HTTP server port |
+| **snapshot** | enabled | `true` | bool | Enable snapshot endpoint |
+| | quality | `85` | int | JPEG quality 1-100 |
+| **rtmp** | enabled | `false` | bool | Enable RTMP push |
+| | url | `"rtmp://push-server/app/stream"` | string | RTMP push URL |
+| | max_retries | `10` | int | Maximum reconnection attempts |
+| **hls** | enabled | `false` | bool | Enable HLS server |
+| | segment_duration | `"2s"` | string | Target segment duration |
 
 ## Environment Variable Overrides
 
@@ -247,35 +359,56 @@ MIBEE_EYE_DEVICE_NAME="Office Camera" ./mibee-eye
 
 | Section | Field | Environment Variable |
 |---------|-------|---------------------|
-| `MIBEE_EYE_CAMERA_BINPATH` |
-| `MIBEE_EYE_CAMERA_DEVICE` |
-| `MIBEE_EYE_CAMERA_WIDTH` |
-| `MIBEE_EYE_CAMERA_HEIGHT` |
-| `MIBEE_EYE_CAMERA_FPS` |
-| `MIBEE_EYE_CAMERA_CODEC` |
-| `MIBEE_EYE_CAMERA_BITRATE` |
-| `MIBEE_EYE_CAMERA_BRIGHTNESS` |
-| `MIBEE_EYE_CAMERA_CONTRAST` |
-| `MIBEE_EYE_CAMERA_SATURATION` |
-| `MIBEE_EYE_CAMERA_SHARPNESS` |
-| `MIBEE_EYE_RTSP_PORT` |
-| `MIBEE_EYE_RTSP_USERNAME` |
-| `MIBEE_EYE_RTSP_PASSWORD` |
-| `MIBEE_EYE_ONVIF_PORT` |
-| `MIBEE_EYE_ONVIF_USERNAME` |
-| `MIBEE_EYE_ONVIF_PASSWORD` |
-| `MIBEE_EYE_RTMP_ENABLED` |
-| `MIBEE_EYE_RTMP_URL` |
-| `MIBEE_EYE_DEVICE_NAME` |
-| `MIBEE_EYE_DEVICE_MANUFACTURER` |
-| `MIBEE_EYE_DEVICE_MODEL` |
-| `MIBEE_EYE_DEVICE_FIRMWARE` |
-| `MIBEE_EYE_DEVICE_HARDWAREID` |
-| `MIBEE_EYE_DEVICE_SERIALNUMBER` |
-| `MIBEE_EYE_WEB_ENABLED` |
-  | `MIBEE_EYE_WEB_PORT` |
-  | `MIBEE_EYE_WEB_USERNAME` |
-  | `MIBEE_EYE_WEB_PASSWORD` |
+| **camera** | device | `MIBEE_EYE_CAMERA_DEVICE` |
+| | width | `MIBEE_EYE_CAMERA_WIDTH` |
+| | height | `MIBEE_EYE_CAMERA_HEIGHT` |
+| | fps | `MIBEE_EYE_CAMERA_FPS` |
+| | codec | `MIBEE_EYE_CAMERA_CODEC` |
+| | bitrate | `MIBEE_EYE_CAMERA_BITRATE` |
+| | brightness | `MIBEE_EYE_CAMERA_BRIGHTNESS` |
+| | contrast | `MIBEE_EYE_CAMERA_CONTRAST` |
+| | saturation | `MIBEE_EYE_CAMERA_SATURATION` |
+| | sharpness | `MIBEE_EYE_CAMERA_SHARPNESS` |
+| | idr_period | `MIBEE_EYE_CAMERA_IDR_PERIOD` |
+| | bin_path | `MIBEE_EYE_CAMERA_BIN_PATH` |
+| | frame_buffer_size | `MIBEE_EYE_CAMERA_FRAME_BUFFER_SIZE` |
+| | max_backoff | `MIBEE_EYE_CAMERA_MAX_BACKOFF` |
+| **rtsp** | port | `MIBEE_EYE_RTSP_PORT` |
+| | username | `MIBEE_EYE_RTSP_USERNAME` |
+| | password | `MIBEE_EYE_RTSP_PASSWORD` |
+| | subscriber_buffer_size | `MIBEE_EYE_RTSP_SUBSCRIBER_BUFFER_SIZE` |
+| | write_queue_size | `MIBEE_EYE_RTSP_WRITE_QUEUE_SIZE` |
+| | enable_udp | `MIBEE_EYE_RTSP_ENABLE_UDP` |
+| | udp_rtp_port | `MIBEE_EYE_RTSP_UDP_RTP_PORT` |
+| | udp_rtcp_port | `MIBEE_EYE_RTSP_UDP_RTCP_PORT` |
+| **onvif** | port | `MIBEE_EYE_ONVIF_PORT` |
+| | username | `MIBEE_EYE_ONVIF_USERNAME` |
+| | password | `MIBEE_EYE_ONVIF_PASSWORD` |
+| **device** | name | `MIBEE_EYE_DEVICE_NAME` |
+| | manufacturer | `MIBEE_EYE_DEVICE_MANUFACTURER` |
+| | model | `MIBEE_EYE_DEVICE_MODEL` |
+| | firmware | `MIBEE_EYE_DEVICE_FIRMWARE` |
+| | hardware_id | `MIBEE_EYE_DEVICE_HARDWAREID` |
+| | serial_number | `MIBEE_EYE_DEVICE_SERIALNUMBER` |
+| **logging** | level | `MIBEE_EYE_LOGGING_LEVEL` |
+| **web** | enabled | `MIBEE_EYE_WEB_ENABLED` |
+| | port | `MIBEE_EYE_WEB_PORT` |
+| | username | `MIBEE_EYE_WEB_USERNAME` |
+| | password | `MIBEE_EYE_WEB_PASSWORD` |
+| | allowed_origins | `MIBEE_EYE_WEB_ALLOWED_ORIGINS` |
+| | read_header_timeout | `MIBEE_EYE_WEB_READ_HEADER_TIMEOUT` |
+| | read_timeout | `MIBEE_EYE_WEB_READ_TIMEOUT` |
+| | write_timeout | `MIBEE_EYE_WEB_WRITE_TIMEOUT` |
+| | idle_timeout | `MIBEE_EYE_WEB_IDLE_TIMEOUT` |
+| **metrics** | enabled | `MIBEE_EYE_METRICS_ENABLED` |
+| | port | `MIBEE_EYE_METRICS_PORT` |
+| **snapshot** | enabled | `MIBEE_EYE_SNAPSHOT_ENABLED` |
+| | quality | `MIBEE_EYE_SNAPSHOT_QUALITY` |
+| **rtmp** | enabled | `MIBEE_EYE_RTMP_ENABLED` |
+| | url | `MIBEE_EYE_RTMP_URL` |
+| | max_retries | `MIBEE_EYE_RTMP_MAX_RETRIES` |
+| **hls** | enabled | `MIBEE_EYE_HLS_ENABLED` |
+| | segment_duration | `MIBEE_EYE_HLS_SEGMENT_DURATION` |
 
 ## Example Configurations
 
@@ -367,7 +500,7 @@ web:
   username: "admin"
   password: ""
 
-device:
+### Cloud Streaming Configuration
 ### Cloud Streaming Configuration
 
 ```yaml
@@ -408,7 +541,7 @@ web:
   username: "admin"
   password: ""
 
-rtmp:
+### Low-Bandwidth Configuration
 ### Low-Bandwidth Configuration
 
 ```yaml
@@ -449,7 +582,7 @@ web:
   username: "admin"
   password: ""
 
-device:
+## Configuration Tips
 ## Configuration Tips
 
 1. **Camera Compatibility**: Not all resolutions and settings work with all camera modules. Test your configuration with your specific camera hardware.
@@ -469,4 +602,3 @@ device:
 8. **Web UI Access**: The web admin panel is available at http://<device-ip>:8088/. Use ONVIF credentials (or web-specific credentials if configured) to log in.
 
 9. **Camera Binary**: The `bin_path` must point to a valid mtxrpicam binary. The directory containing this binary must also contain the bundled libcamera shared libraries (libcamera.so.9.9, libcamera-base.so.9.9) and IPA modules. See deployment documentation for details.
-8. **Camera Binary**: The `bin_path` must point to a valid mtxrpicam binary. The directory containing this binary must also contain the bundled libcamera shared libraries (libcamera.so.9.9, libcamera-base.so.9.9) and IPA modules. See deployment documentation for details.

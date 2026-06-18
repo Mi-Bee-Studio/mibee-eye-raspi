@@ -1,4 +1,4 @@
-# Configuration Documentation
+# 配置文档
 
 [English](../configuration.md)
 
@@ -31,6 +31,9 @@ logging:       # 日志配置
 
 ```yaml
 camera:
+  # 捕获模式："mtxrpicam"（默认，使用子进程）或 "rtsp"（消费外部 RTSP URL）
+  mode: mtxrpicam
+
   # mtxrpicam 二进制文件路径（摄像头捕获子进程）
   # 此二进制文件及其捆绑的 libcamera 库必须存在于该路径下
   bin_path: deploy/bin/mtxrpicam
@@ -65,6 +68,18 @@ camera:
   
   # 锐度：0.0 到 16.0（1.0 = 默认值）
   sharpness: 1.0
+  
+  # mode=rtsp 时的外部 RTSP URL（mode=mtxrpicam 时忽略）
+  rtsp_url: ""
+  
+  # 关键帧间隔（1=每帧，15=每15帧）
+  idr_period: 15
+  
+  # 帧通道缓冲容量（帧数）
+  frame_buffer_size: 30
+  
+  # 最大子进程重启退避持续时间
+  max_backoff: 30s
 ```
 
 ### RTSP 配置
@@ -80,6 +95,21 @@ rtsp:
   # 留空字符串表示无身份验证
   username: ""
   password: ""
+  
+  # AUHub 订阅者通道缓冲大小
+  subscriber_buffer_size: 64
+  
+  # gortsplib 写队列大小（256默认对WiFi来说太小）
+  write_queue_size: 2048
+  
+  # 启用 UDP 传输（NVR客户端需要）
+  enable_udp: true
+  
+  # UDP RTP 端口（默认：8000）
+  udp_rtp_port: 8000
+  
+  # UDP RTCP 端口（默认：8001）
+  udp_rtcp_port: 8001
 ```
 
 ### ONVIF 配置
@@ -115,6 +145,16 @@ web:
   # 当用户名/密码为空时使用 ONVIF 凭据
   username: "admin"
   password: ""
+  
+  # CORS 允许的来源（生产环境使用特定来源）
+  allowed_origins:
+    - "*"
+  
+  # HTTP 服务器超时
+  read_header_timeout: 5s
+  read_timeout: 10s
+  write_timeout: 30s
+  idle_timeout: 120s
 ```
 
 
@@ -128,10 +168,13 @@ rtmp:
   enabled: false
   
   # 云服务的 RTMP 推送 URL
-  # 示例： 
+  # 示例：
   # - rtmp://push-server/app/stream
   # - rtmp://live.twitch.tv/app/channel-key
   url: "rtmp://push-server/app/stream"
+  
+  # 最大重连尝试次数（0 = 无限制）
+  max_retries: 10
 ```
 
 ### 设备配置
@@ -173,6 +216,53 @@ logging:
   level: "info"
 ```
 
+### Snapshot 配置
+
+Snapshot 端点设置，用于通过 HTTP 进行 JPEG/H.264 捕获。
+
+```yaml
+snapshot:
+  # 启用 snapshot 端点（默认：true）
+  enabled: true
+
+  # JPEG 质量 1-100（仅用于 rpicam-still 子进程；H.264 IDR 回退忽略此设置）
+  quality: 85
+```
+
+Snapshot 端点使用双层策略：
+1. **第一层**：当摄像头空闲时，`rpicam-still` 子进程捕获真实 JPEG
+2. **第二层**：当摄像头管道忙碌时，回退到存储的 H.264 IDR 帧（返回为 `video/H264`）
+
+### Metrics 配置
+
+Prometheus 指标导出器设置。
+
+```yaml
+metrics:
+  # 启用指标 HTTP 端点（默认：true）
+  enabled: true
+
+  # 指标 HTTP 服务器端口（默认：9100）
+  # 注意：9100 与 Prometheus node_exporter 冲突 — 如果两者在同一主机上运行，请更改端口或禁用
+  port: 9100
+```
+
+### HLS 配置
+
+HLS 实时流设置，用于浏览器播放。
+
+```yaml
+hls:
+  # 启用 HLS 服务器（默认：false）
+  enabled: false
+
+  # 目标分段持续时间（默认：2s）
+  segment_duration: 2s
+```
+
+HLS 服务器使用纯 Go MPEG-TS 分段器 — 无 ffmpeg 子进程。分段保存在内存中。
+
+
 ## 默认值参考
 
 | 部分 | 字段 | 默认值 | 类型 | 描述 |
@@ -206,7 +296,6 @@ logging:
   | **web** | enabled | `true` | bool | 启用 Web UI |
   | | port | `8088` | int | Web UI HTTP 端口 |
   | | username | `""` | string | Web UI 用户名（默认使用 onvif.username） |
-  | | password | `""` | string | Web UI 密码（默认使用 onvif.password） |
 
 ## 环境变量覆盖
 
@@ -240,11 +329,7 @@ MIBEE_EYE_ONVIF_PASSWORD=securepassword123 ./mibee-eye
 # 设置设备信息
 MIBEE_EYE_DEVICE_NAME="Office Camera" ./mibee-eye
 ```
-
-# 设置设备信息
-MIBEE_EYE_DEVICE_NAME="Office Camera" ./mibee-eye
 ```
-
 ### 所有环境变量
 
 | 部分 | 字段 | 环境变量 |
@@ -327,9 +412,6 @@ web:
   port: 8088
   username: "admin"
   password: ""
-```
-  level: "info"
-```
 
 ### 高分辨率配置
 ```yaml
@@ -368,14 +450,6 @@ web:
   port: 8088
   username: "admin"
   password: ""
-```
-  name: "HD Security Camera"
-  manufacturer: "Raspberry Pi"
-  model: "OV5647"
-  firmware: "2.0.0"
-  hardware_id: "OV5647-HD"
-  serial_number: "SN-2024-001"
-```
 
 ### 云流媒体配置
 ```yaml
@@ -416,7 +490,6 @@ web:
   username: "admin"
   password: ""
 
-```
 
 ### 低带宽配置
 ```yaml
@@ -448,17 +521,12 @@ device:
   firmware: "1.0.0"
   hardware_id: "OV5647-LBW"
 
-logging:
-
-  level: "error"
 
 web:
   enabled: true
   port: 8088
   username: "admin"
   password: ""
-```
-```
 
 ## 配置提示
 
