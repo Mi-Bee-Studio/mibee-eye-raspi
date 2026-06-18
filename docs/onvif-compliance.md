@@ -105,48 +105,19 @@ Settings:
 PTZ service was removed as dead code (state machine tracked position but never applied to camera - no ScalerCrop wiring). The OV5647 hardware has no PTZ motors.
 
 
-## WS-Discovery Support
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-## WS-Discovery Support
-
 The service supports both WS-Discovery probe methods:
-
 ### UDP Multicast (239.255.255.250:3702)
 - Listens for Probe messages on multicast group
 - Responds with ProbeMatches containing device metadata
 - Automatically detects local IP for XAddr generation
+- Scopes include /name/ and /hardware/ for NVR matching
 
 ### HTTP POST Probe (/onvif/device_service)
 - Handles Probe messages via HTTP POST to device service endpoint
 - Enables discovery through firewalls/proxies
 - Same XML response as UDP multicast
+- ProbeMatches XML is built as raw string bytes (not encoding/xml) for exact element local names
+- NVR depends on exact ProbeMatch structure for device matching
 
 **ProbeMatches Response:**
 ```xml
@@ -186,7 +157,6 @@ UsernameToken authentication is implemented with both password types:
 ### Functional Limitations
 - **Single Profile**: Only one media profile supported (main profile)
 - **No Audio**: Audio streaming not implemented
-- **No Audio**: Audio streaming not implemented
 - **No Events**: Event service not supported
 - **No Analytics**: Video analytics not available
 - **No Extensions**: ONVIF extensions (e.g., Analytics, Search) not implemented
@@ -225,7 +195,6 @@ UsernameToken authentication is implemented with both password types:
 |---------|----------|----------|-------------|
 | Device Service | `/onvif/device_service` | HTTP/SOAP | Device management |
 | Media Service | `/onvif/media_service` | HTTP/SOAP | Media profile/URI |
-| Snapshot | `/snapshot` | HTTP | JPEG snapshots |
 | Snapshot | `/snapshot` | HTTP | JPEG snapshots |
 | RTSP Stream | `/stream` | RTSP | H.264 video stream |
 

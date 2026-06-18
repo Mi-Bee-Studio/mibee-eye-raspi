@@ -105,34 +105,17 @@ Settings:
 PTZ 服务已作为死代码移除（状态机跟踪位置但从未应用到相机 - 无 ScalerCrop 连接）。OV5647 硬件没有 PTZ 电机。
 ## WS-Discovery 支持
 服务支持两种 WS-Discovery 探测方法：
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 ### UDP 组播 (239.255.255.250:3702)
 - 在组播地址上侦听 Probe 消息
 - 发送包含设备元数据的 ProbeMatches 响应
 - 自动检测本地 IP 用于 XAddr 生成
+- 范围包括 /name/ 和 /hardware/ 用于 NVR 匹配
 ### HTTP POST 探测 (/onvif/device_service)
 - 通过 HTTP POST 到设备服务端点处理 Probe 消息
 - 支持通过防火墙/代理进行发现
 - 与 UDP 组播相同的 XML 响应
+- ProbeMatches XML 作为原始字符串字节构建（不是 encoding/xml）以保持精确的元素本地名称
+- NVR 依赖精确的 ProbeMatch 结构进行设备匹配
 **ProbeMatches 响应：**
 ```xml
 <ProbeMatch>
@@ -145,15 +128,6 @@ PTZ 服务已作为死代码移除（状态机跟踪位置但从未应用到相�
   <MetadataVersion>1</MetadataVersion>
 </ProbeMatch>
 ```
-  <EndpointReference>
-    <Address>uuid:device-uuid-here</Address>
-  </EndpointReference>
-  <Scopes>onvif://www.onvif.org/name/Pi Camera V1 onvif://www.onvif.org/hardware/OV5647</Scopes>
-  <XAddrs>http://<相机IP>:8080/onvif/device_service</XAddrs>
-  <Types>tdn:NetworkVideoTransmitter tdn:Device</Types>
-  <MetadataVersion>1</MetadataVersion>
-  </ProbeMatch>
-  ```
   ## WS-Security 支持
   UsernameToken 身份验证实现了两种密码类型：
   ### PasswordText 模式
@@ -169,22 +143,11 @@ PTZ 服务已作为死代码移除（状态机跟踪位置但从未应用到相�
 2. 如果存在 Nonce，计算摘要并比较
 3. 如果没有 Nonce，使用直接密码比较
 4. 返回包含用户名和成功状态的 AuthResult
-### PasswordDigest 模式  
-- SHA1 摘要：`base64(SHA1(base64(Nonce) + Created + Password))`
-#SV>- 更安全，需要 Nonce 和 Created 时间戳
-#XP>- 推荐生产环境使用
-
-**身份验证流程：**
-1. 解析 SOAP Security 头部的 UsernameToken
-2. 如果存在 Nonce，计算摘要并比较
-3. 如果没有 Nonce，使用直接密码比较
-4. 返回包含用户名和成功状态的 AuthResult
 
 ## 已知限制
 
 ### 功能限制
 - **单一配置文件**：只支持一个媒体配置文件（主配置文件）
-- **无音频**：音频流未实现
 - **无音频**：音频流未实现
 - **无事件**：事件服务不支持
 - **无分析**：视频分析不可用
@@ -224,7 +187,6 @@ PTZ 服务已作为死代码移除（状态机跟踪位置但从未应用到相�
 |---------|----------|----------|-------------|
 | Device 服务 | `/onvif/device_service` | HTTP/SOAP | 设备管理 |
 | Media 服务 | `/onvif/media_service` | HTTP/SOAP | 媒体配置文件/URI |
-| 快照 | `/snapshot` | HTTP | JPEG 快照 |
 | 快照 | `/snapshot` | HTTP | JPEG 快照 |
 | RTSP 流 | `/stream` | RTSP | H.264 视频流 |
 
