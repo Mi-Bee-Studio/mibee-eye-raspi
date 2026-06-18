@@ -6,23 +6,25 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
-	"github.com/google/uuid"
+
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/config"
+	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/netutil"
+	"github.com/google/uuid"
 )
 
 // WS-Discovery constants.
 const (
-	DiscoveryAddr    = "239.255.255.250:3702"
-	DiscoveryTTL     = 1
-	ProbeAction      = "http://schemas.xmlsoap.org/ws/2004/09/discovery/Probe"
+	DiscoveryAddr      = "239.255.255.250:3702"
+	DiscoveryTTL       = 1
+	ProbeAction        = "http://schemas.xmlsoap.org/ws/2004/09/discovery/Probe"
 	ProbeMatchesAction = "http://schemas.xmlsoap.org/ws/2004/09/discovery/ProbeMatches"
-	DiscoveryNS      = "http://schemas.xmlsoap.org/ws/2004/09/discovery"
+	DiscoveryNS        = "http://schemas.xmlsoap.org/ws/2004/09/discovery"
 )
 
 // Discovery handles WS-Discovery Probe/ProbeMatches for ONVIF device discovery.
@@ -47,7 +49,7 @@ func NewDiscovery(cfg *config.Config, fallbackIP string) *Discovery {
 		port = 8080
 	}
 	if fallbackIP == "" {
-		fallbackIP = detectLocalIP()
+		fallbackIP = netutil.DetectLocalIP()
 	}
 
 	name := cfg.Device.Name
@@ -108,7 +110,7 @@ func (d *Discovery) StartUDP(ctx context.Context) error {
 
 	go d.readLoop(ctx)
 
-	log.Printf("onvif: discovery UDP listener started on %s", DiscoveryAddr)
+	slog.Info("onvif: discovery UDP listener started", "address", DiscoveryAddr)
 	return nil
 }
 
@@ -158,12 +160,11 @@ func (d *Discovery) readLoop(ctx context.Context) {
 		if resp == nil {
 			continue
 		}
-
-		log.Printf("onvif: ProbeMatches sent to %s (XAddr host %s)", src.IP, d.fallbackIP)
+		slog.Info("onvif: ProbeMatches sent", "to", src.IP, "xaddr_host", d.fallbackIP)
 
 		_, err = conn.WriteToUDP(resp, src)
 		if err != nil {
-			log.Printf("onvif: failed to send ProbeMatches to %s: %v", src, err)
+			slog.Warn("onvif: failed to send ProbeMatches", "to", src, "error", err)
 		}
 	}
 }
@@ -238,11 +239,18 @@ func isProbeAction(action string) bool {
 		action == ProbeAction
 }
 
+// xmlEscape escapes special XML characters in a string.
+func xmlEscape(s string) string {
+	var buf bytes.Buffer
+	xml.EscapeText(&buf, []byte(s))
+	return buf.String()
+}
 // buildProbeMatches creates the ProbeMatches XML response.
 // hostIP is the IP to use in XAddr; pass "" to use the device's own fallback address.
 func (d *Discovery) buildProbeMatches(messageID, hostIP string) []byte {
-	scopesStr := strings.Join(d.scopes, " ")
-	xaddrsStr := strings.Join(d.XAddrs(hostIP), " ")
+	scopesStr := xmlEscape(strings.Join(d.scopes, " "))
+	xaddrsStr := xmlEscape(strings.Join(d.XAddrs(hostIP), " "))
+	escapedMsgID := xmlEscape(messageID)
 
 	// Build raw XML to maintain precise namespace control matching NVR expectations.
 	// The NVR's probeMatchEnvelope uses local-name matching, so the XML element names
@@ -252,7 +260,7 @@ func (d *Discovery) buildProbeMatches(messageID, hostIP string) []byte {
 	buf.WriteString(`<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:a="http://www.w3.org/2005/08/addressing">`)
 	buf.WriteString(`<s:Header>`)
 	buf.WriteString(fmt.Sprintf(`<a:Action s:mustUnderstand="1">%s</a:Action>`, ProbeMatchesAction))
-	buf.WriteString(fmt.Sprintf(`<a:RelatesTo>%s</a:RelatesTo>`, messageID))
+	buf.WriteString(fmt.Sprintf(`<a:RelatesTo>%s</a:RelatesTo>`, escapedMsgID))
 	buf.WriteString(`<a:To s:mustUnderstand="1">http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous</a:To>`)
 	buf.WriteString(`</s:Header>`)
 	buf.WriteString(`<s:Body>`)
@@ -271,20 +279,4 @@ func (d *Discovery) buildProbeMatches(messageID, hostIP string) []byte {
 	buf.WriteString(`</s:Envelope>`)
 
 	return buf.Bytes()
-}
-
-// detectLocalIP finds a non-loopback IPv4 address for XAddr generation.
-func detectLocalIP() string {
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return "127.0.0.1"
-	}
-
-	for _, addr := range addrs {
-		if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() && ipnet.IP.To4() != nil {
-			return ipnet.IP.String()
-		}
-	}
-
-	return "127.0.0.1"
 }

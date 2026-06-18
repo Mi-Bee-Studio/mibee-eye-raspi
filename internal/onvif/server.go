@@ -6,11 +6,13 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/config"
 )
 
 // ActionHandler handles a specific ONVIF SOAP action.
@@ -29,28 +31,16 @@ type soapResponseBody struct {
 }
 
 type Server struct {
-	httpServer      *http.Server
-	auth            *Auth
-	actions         map[string]ActionHandler
-	config          ConfigProvider
+	httpServer       *http.Server
+	auth             *Auth
+	actions          map[string]ActionHandler
+	config           config.ConfigProvider
 	discoveryHandler http.Handler // handles WS-Discovery HTTP probes
-}
-
-// ConfigProvider provides auth and media configuration. Kept as interface for testability.
-type ConfigProvider interface {
-	ONVIFUsername() string
-	ONVIFPassword() string
-	ONVIFPort() int
-	RTSPPort() int
-	DeviceIP() string
-	CameraWidth() int
-	CameraHeight() int
-	CameraFPS() int
-	CameraBitrate() int
+	snapshotHandler  http.Handler // handles GET /snapshot JPEG capture
 }
 
 // New creates a new ONVIF server.
-func New(cfg ConfigProvider) *Server {
+func New(cfg config.ConfigProvider) *Server {
 	return &Server{
 		auth:    &Auth{Username: cfg.ONVIFUsername(), Password: cfg.ONVIFPassword()},
 		actions: make(map[string]ActionHandler),
@@ -66,6 +56,9 @@ func (s *Server) RegisterAction(action string, handler ActionHandler) {
 // SetDiscoveryHandler sets the handler for WS-Discovery HTTP probe requests.
 func (s *Server) SetDiscoveryHandler(h http.Handler) {
 	s.discoveryHandler = h
+}
+func (s *Server) SetSnapshotHandler(h http.Handler) {
+	s.snapshotHandler = h
 }
 
 // parseSOAPRequest parses a raw SOAP request body and extracts the action name
@@ -154,7 +147,7 @@ func writeSOAPResponse(w http.ResponseWriter, data interface{}) error {
 // writeSOAPFault returns a SOAP 1.2 fault response with the given HTTP status code.
 func writeSOAPFault(w http.ResponseWriter, faultCode, reason string, httpStatus int) error {
 	fault := SOAPFault{
-		Code: SOAPFaultCode{Value: faultCode},
+		Code:   SOAPFaultCode{Value: faultCode},
 		Reason: SOAPFaultReason{Text: reason},
 	}
 	env := soapFaultEnvelope{
@@ -190,7 +183,13 @@ func isAuthRequired(action string) bool {
 	return false
 }
 
-	func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Snapshot endpoint: GET /snapshot returns JPEG or raw H.264 frame.
+	if r.Method == http.MethodGet && r.URL.Path == "/snapshot" && s.snapshotHandler != nil {
+		s.snapshotHandler.ServeHTTP(w, r)
+		return
+	}
+	// All other ONVIF operations use POST.
 	if r.Method != http.MethodPost {
 		writeSOAPFault(w, "soap:Sender", fmt.Sprintf("unsupported method: %s", r.Method), http.StatusInternalServerError)
 		return
@@ -241,7 +240,7 @@ func isAuthRequired(action string) bool {
 	}
 
 	if err := writeSOAPResponse(w, result); err != nil {
-		log.Printf("onvif: failed to write response for %s: %v", action, err)
+		slog.Warn("onvif: failed to write response", "action", action, "error", err)
 	}
 }
 
@@ -265,7 +264,7 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf("onvif: server starting on %s", addr)
+		slog.Info("onvif: server starting", "addr", addr)
 		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}

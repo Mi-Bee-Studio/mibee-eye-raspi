@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
+
+	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/config"
 )
 
 // ---------------------------------------------------------------------------
@@ -19,10 +21,10 @@ type GetProfilesResponse struct {
 // Profile represents an ONVIF media profile.
 // Element name is "Profiles" (plural) to match onvif-go client's expected XML tag.
 type Profile struct {
-	XMLName                   xml.Name                  `xml:"Profiles"`
-	Token                     string                    `xml:"token,attr"`
-	Name                      string                    `xml:"Name"`
-	VideoSourceConfiguration  *VideoSourceConfiguration `xml:"VideoSourceConfiguration"`
+	XMLName                   xml.Name                   `xml:"Profiles"`
+	Token                     string                     `xml:"token,attr"`
+	Name                      string                     `xml:"Name"`
+	VideoSourceConfiguration  *VideoSourceConfiguration  `xml:"VideoSourceConfiguration"`
 	VideoEncoderConfiguration *VideoEncoderConfiguration `xml:"VideoEncoderConfiguration"`
 }
 
@@ -46,11 +48,11 @@ type Bounds struct {
 
 // VideoEncoderConfiguration represents a video encoder configuration.
 type VideoEncoderConfiguration struct {
-	Token     string     `xml:"token,attr"`
-	Name      string     `xml:"Name"`
-	UseCount  int        `xml:"UseCount"`
-	Encoding  string     `xml:"Encoding"`
-	Resolution Resolution `xml:"Resolution"`
+	Token       string      `xml:"token,attr"`
+	Name        string      `xml:"Name"`
+	UseCount    int         `xml:"UseCount"`
+	Encoding    string      `xml:"Encoding"`
+	Resolution  Resolution  `xml:"Resolution"`
 	RateControl RateControl `xml:"RateControl"`
 }
 
@@ -62,8 +64,8 @@ type Resolution struct {
 
 // RateControl defines video encoder rate control settings.
 type RateControl struct {
-	FrameRateLimit int `xml:"FrameRateLimit"`
-	BitrateLimit   int `xml:"BitrateLimit"`
+	FrameRateLimit   int `xml:"FrameRateLimit"`
+	BitrateLimit     int `xml:"BitrateLimit"`
 	EncodingInterval int `xml:"EncodingInterval"`
 }
 
@@ -95,7 +97,7 @@ type GetStreamUriResponse struct {
 
 // MediaUri holds the stream URI and its validity constraints.
 type MediaUri struct {
-	Uri                string `xml:"Uri"`
+	Uri                 string `xml:"Uri"`
 	InvalidAfterConnect string `xml:"InvalidAfterConnect"`
 	InvalidAfterReboot  string `xml:"InvalidAfterReboot"`
 	Timeout             string `xml:"Timeout"`
@@ -122,8 +124,8 @@ type VideoSource struct {
 // ---------------------------------------------------------------------------
 
 // RegisterMediaHandlers registers all Media service handlers on the ONVIF server.
-// It reads camera and RTSP configuration from the server's ConfigProvider.
-// The RTSP URL returned by GetStreamUri reflects the IP address the NVR used
+// RegisterMediaHandlers registers all Media service handlers on the ONVIF server.
+// It reads camera and RTSP configuration from the server's config provider.
 // to reach this device — the per-request client IP — so the URL is reachable
 // from the NVR regardless of which interface was used.
 func RegisterMediaHandlers(s *Server) {
@@ -143,7 +145,7 @@ func RegisterMediaHandlers(s *Server) {
 }
 
 // handleGetProfiles returns the media profiles configured on this device.
-func handleGetProfiles(cfg ConfigProvider) *GetProfilesResponse {
+func handleGetProfiles(cfg config.ConfigProvider) *GetProfilesResponse {
 	w, h, fps, bitrate := cfg.CameraWidth(), cfg.CameraHeight(), cfg.CameraFPS(), cfg.CameraBitrate()
 
 	return &GetProfilesResponse{
@@ -182,13 +184,13 @@ func handleGetProfiles(cfg ConfigProvider) *GetProfilesResponse {
 // The IP portion of the URL is taken from the per-request context (i.e. the
 // NVR's source IP), falling back to cfg.DeviceIP() when no client IP is set
 // (e.g. in unit tests calling this function directly).
-func handleGetStreamUri(ctx context.Context, cfg ConfigProvider) *GetStreamUriResponse {
+func handleGetStreamUri(ctx context.Context, cfg config.ConfigProvider) *GetStreamUriResponse {
 	ip := ServerIPFromContext(ctx, cfg.DeviceIP())
 	uri := fmt.Sprintf("rtsp://%s:%d/stream", ip, cfg.RTSPPort())
 
 	return &GetStreamUriResponse{
 		MediaUri: MediaUri{
-			Uri:                uri,
+			Uri:                 uri,
 			InvalidAfterConnect: "false",
 			InvalidAfterReboot:  "false",
 			Timeout:             "PT0S",
@@ -197,7 +199,7 @@ func handleGetStreamUri(ctx context.Context, cfg ConfigProvider) *GetStreamUriRe
 }
 
 // handleGetVideoSources returns the video source information.
-func handleGetVideoSources(cfg ConfigProvider) *GetVideoSourcesResponse {
+func handleGetVideoSources(cfg config.ConfigProvider) *GetVideoSourcesResponse {
 	return &GetVideoSourcesResponse{
 		VideoSources: []VideoSource{{
 			Token: "videoSrc0",

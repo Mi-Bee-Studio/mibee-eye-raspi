@@ -160,23 +160,33 @@ func TestCheckDigestEmptyNonce(t *testing.T) {
 	}
 }
 
-// mockConfig implements ConfigProvider for tests.
+// mockConfig implements config.ConfigProvider for tests.
 type mockConfig struct {
 	username string
 	password string
 	port     int
 }
 
-func (m *mockConfig) ONVIFUsername() string { return m.username }
-func (m *mockConfig) ONVIFPassword() string { return m.password }
-func (m *mockConfig) ONVIFPort() int        { return m.port }
-func (m *mockConfig) RTSPPort() int        { return 8554 }
-func (m *mockConfig) DeviceIP() string       { return "192.168.1.100" }
-func (m *mockConfig) CameraWidth() int      { return 1280 }
-func (m *mockConfig) CameraHeight() int     { return 720 }
-func (m *mockConfig) CameraFPS() int         { return 15 }
-func (m *mockConfig) CameraBitrate() int    { return 2_000_000 }
-
+func (m *mockConfig) ONVIFUsername() string      { return m.username }
+func (m *mockConfig) ONVIFPassword() string      { return m.password }
+func (m *mockConfig) ONVIFPort() int             { return m.port }
+func (m *mockConfig) RTSPPort() int              { return 8554 }
+func (m *mockConfig) DeviceIP() string           { return "192.168.1.100" }
+func (m *mockConfig) CameraWidth() int           { return 1280 }
+func (m *mockConfig) CameraHeight() int          { return 720 }
+func (m *mockConfig) CameraFPS() int             { return 15 }
+func (m *mockConfig) CameraBitrate() int         { return 2_000_000 }
+func (m *mockConfig) CameraDevice() string       { return "/dev/video0" }
+func (m *mockConfig) CameraCodec() string        { return "h264" }
+func (m *mockConfig) DeviceName() string         { return "Test Camera" }
+func (m *mockConfig) DeviceManufacturer() string { return "Test Manufacturer" }
+func (m *mockConfig) DeviceModel() string        { return "TestModel" }
+func (m *mockConfig) DeviceFirmware() string     { return "1.0.0" }
+func (m *mockConfig) DeviceHardwareID() string   { return "TEST001" }
+func (m *mockConfig) DeviceSerialNumber() string { return "" }
+func (m *mockConfig) LoggingLevel() string       { return "info" }
+func (m *mockConfig) SnapshotEnabled() bool { return true }
+func (m *mockConfig) SnapshotQuality() int  { return 85 }
 func TestParseSOAP(t *testing.T) {
 	soapReq := `<?xml version="1.0" encoding="UTF-8"?>
 <s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope">
@@ -248,7 +258,6 @@ func TestParseSOAPWithAuth(t *testing.T) {
 		t.Fatalf("body content missing action element: %s", string(bodyContent))
 	}
 }
-
 
 func TestParseInvalidXML(t *testing.T) {
 	_, _, err := parseSOAPRequest([]byte("not xml at all <><<<"))
