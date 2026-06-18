@@ -70,8 +70,6 @@
             'camera.live': 'LIVE',
             'camera.imaging': 'Imaging Controls',
             'camera.imagingSub': 'Tune sensor parameters in real time.',
-            'camera.ptz': 'PTZ Controls',
-            'camera.ptzSub': 'Digital pan, tilt and zoom via software crop.',
 
             'imaging.brightness': 'Brightness',
             'imaging.contrast': 'Contrast',
@@ -82,27 +80,6 @@
             'imaging.hflip': 'Horizontal Flip',
             'imaging.vflip': 'Vertical Flip',
 
-            'ptz.pan': 'Pan',
-            'ptz.tilt': 'Tilt',
-            'ptz.zoom': 'Zoom',
-            'ptz.status': 'Status',
-            'ptz.idle': 'IDLE',
-            'ptz.moving': 'MOVING',
-            'ptz.stop': 'STOP',
-            'ptz.panLeft': 'Pan left',
-            'ptz.panRight': 'Pan right',
-            'ptz.tiltUp': 'Tilt up',
-            'ptz.tiltDown': 'Tilt down',
-            'ptz.zoomIn': 'Zoom +',
-            'ptz.zoomOut': 'Zoom −',
-            'ptz.presets': 'Presets',
-            'ptz.presetsSub': 'Save and recall positions for quick access.',
-            'ptz.addPreset': 'Add Preset',
-            'ptz.presetName': 'Preset',
-            'ptz.goto': 'Goto',
-            'ptz.delete': 'Delete',
-            'ptz.noPresets': 'No presets defined',
-            'ptz.presetPos': 'P: {p}  T: {t}  Z: {z}',
 
             'actions.save': 'Save',
             'actions.cancel': 'Cancel',
@@ -121,7 +98,6 @@
             'toast.configLoad': { title: 'Load failed', msg: 'Failed to load config: {err}' },
             'toast.imagingLoad': { title: 'Load failed', msg: 'Failed to load imaging controls: {err}' },
             'toast.paramError': { title: 'Parameter error', msg: '{name}: {err}' },
-            'toast.ptzMove': { title: 'PTZ error', msg: 'PTZ move error: {err}' },
             'toast.presetAdd': { title: 'Preset error', msg: 'Add preset error: {err}' },
             'toast.presetGoto': { title: 'Goto error', msg: 'Goto preset error: {err}' },
             'toast.presetDelete': { title: 'Delete error', msg: 'Delete preset error: {err}' },
@@ -137,7 +113,6 @@
             'modal.confirmOnvifSave': 'This will restart the server. Continue?',
             'modal.confirmPresetDelete': 'Are you sure you want to delete this preset?',
 
-            'ptz.renamePreset': 'Rename'
         },
 
         zh: {
@@ -178,8 +153,6 @@
             'camera.live': '直播',
             'camera.imaging': '图像控制',
             'camera.imagingSub': '实时调节传感器参数。',
-            'camera.ptz': 'PTZ 控制',
-            'camera.ptzSub': '通过软件裁剪实现数字云台。',
 
             'imaging.brightness': '亮度',
             'imaging.contrast': '对比度',
@@ -190,27 +163,6 @@
             'imaging.hflip': '水平翻转',
             'imaging.vflip': '垂直翻转',
 
-            'ptz.pan': '水平',
-            'ptz.tilt': '垂直',
-            'ptz.zoom': '缩放',
-            'ptz.status': '状态',
-            'ptz.idle': '空闲',
-            'ptz.moving': '运动中',
-            'ptz.stop': '停止',
-            'ptz.panLeft': '向左',
-            'ptz.panRight': '向右',
-            'ptz.tiltUp': '向上',
-            'ptz.tiltDown': '向下',
-            'ptz.zoomIn': '放大',
-            'ptz.zoomOut': '缩小',
-            'ptz.presets': '预置位',
-            'ptz.presetsSub': '保存和调用位置以便快速访问。',
-            'ptz.addPreset': '添加预置位',
-            'ptz.presetName': '预置位',
-            'ptz.goto': '调用',
-            'ptz.delete': '删除',
-            'ptz.noPresets': '暂无预置位',
-            'ptz.presetPos': '水平: {p}  垂直: {t}  缩放: {z}',
 
             'actions.save': '保存',
             'actions.cancel': '取消',
@@ -229,7 +181,6 @@
             'toast.configLoad': { title: '加载失败', msg: '无法加载配置：{err}' },
             'toast.imagingLoad': { title: '加载失败', msg: '无法加载图像控制：{err}' },
             'toast.paramError': { title: '参数错误', msg: '{name}：{err}' },
-            'toast.ptzMove': { title: '云台错误', msg: '云台移动失败：{err}' },
             'toast.presetAdd': { title: '预置位错误', msg: '添加预置位失败：{err}' },
             'toast.presetGoto': { title: '调用错误', msg: '调用预置位失败：{err}' },
             'toast.presetDelete': { title: '删除错误', msg: '删除预置位失败：{err}' },
@@ -245,7 +196,6 @@
             'modal.confirmOnvifSave': '此操作将重启服务器，确定继续吗？',
             'modal.confirmPresetDelete': '确定要删除此预置位吗？',
 
-            'ptz.renamePreset': '重命名'
         }
     };
 
@@ -699,7 +649,6 @@
         }
         if (tab === 'camera') {
             if (!state.imagingRendered) loadImaging();
-            if (!state.ptzRendered) loadPTZ();
             startMsePlayer();
         }
         if (tab !== 'camera') {
@@ -1830,303 +1779,6 @@
     }
 
     /* ======================================================================
-       Camera Tab — PTZ Controls
-       ====================================================================== */
-
-    function loadPTZ() {
-        state.ptzRendered = true;
-        api('GET', '/api/ptz/status').then(updatePTZDisplay).catch(function () {
-            /* WS will update — no error state needed for PTZ readout */
-        });
-        loadPresets();
-    }
-
-    function updatePTZDisplay(data) {
-        if (!data) return;
-        var pos = data.position || data;
-        var pan = pos.Pan !== undefined ? pos.Pan : 0;
-        var tilt = pos.Tilt !== undefined ? pos.Tilt : 0;
-        var zoom = pos.Zoom !== undefined ? pos.Zoom : 0;
-
-        $('#ptz-pan').textContent = formatNumber(pan, 0.001);
-        $('#ptz-tilt').textContent = formatNumber(tilt, 0.001);
-        $('#ptz-zoom').textContent = formatNumber(zoom, 0.001);
-
-        updatePTZStage(pan, tilt, zoom);
-
-        var statusEl = $('#ptz-status');
-        if (statusEl && data.status) {
-            var statusKey = data.status === 'MOVING' ? 'ptz.moving' :
-                            data.status === 'IDLE' ? 'ptz.idle' : null;
-            statusEl.textContent = statusKey ? t(statusKey) : data.status;
-            statusEl.className = 'ptz-value ptz-status-badge ' + data.status.toLowerCase();
-        }
-    }
-
-    function updatePTZStage(pan, tilt, zoom) {
-        var dot = $('#ptz-stage-dot');
-        if (!dot) return;
-        var pad = 10;
-        var range = 100 - pad * 2;
-        var x = pad + (pan + 1) / 2 * range;
-        var y = pad + (1 - (tilt + 1) / 2) * range;
-        dot.style.left = x + '%';
-        dot.style.top = y + '%';
-    }
-
-    function initPTZControls() {
-        var dirs = {
-            up:    { Pan:  0,   Tilt:  0.5, Zoom: 0 },
-            down:  { Pan:  0,   Tilt: -0.5, Zoom: 0 },
-            left:  { Pan: -0.5, Tilt:  0,   Zoom: 0 },
-            right: { Pan:  0.5, Tilt:  0,   Zoom: 0 }
-        };
-
-        $$('.dpad-btn[data-dir]').forEach(function (btn) {
-            var dir = btn.dataset.dir;
-            if (!dirs[dir]) return;
-
-            btn.addEventListener('mousedown', function (e) { e.preventDefault(); startMove(dirs[dir]); });
-            btn.addEventListener('mouseup', stopMove);
-            btn.addEventListener('mouseleave', stopMove);
-            btn.addEventListener('touchstart', function (e) {
-                e.preventDefault(); startMove(dirs[dir]);
-            }, { passive: false });
-            btn.addEventListener('touchend', stopMove);
-            btn.addEventListener('touchcancel', stopMove);
-        });
-
-        var stopBtn = $('#btn-ptz-stop');
-        if (stopBtn) {
-            stopBtn.addEventListener('mousedown', function (e) { e.preventDefault(); });
-            stopBtn.addEventListener('click', stopMove);
-        }
-
-        var zoomIn = $('[data-dir="zoom-in"]');
-        var zoomOut = $('[data-dir="zoom-out"]');
-
-        if (zoomIn) {
-            zoomIn.addEventListener('mousedown', function (e) { e.preventDefault(); startMove({ Pan: 0, Tilt: 0, Zoom: 0.3 }); });
-            zoomIn.addEventListener('mouseup', stopMove);
-            zoomIn.addEventListener('mouseleave', stopMove);
-            zoomIn.addEventListener('touchstart', function (e) {
-                e.preventDefault(); startMove({ Pan: 0, Tilt: 0, Zoom: 0.3 });
-            }, { passive: false });
-            zoomIn.addEventListener('touchend', stopMove);
-            zoomIn.addEventListener('touchcancel', stopMove);
-        }
-        if (zoomOut) {
-            zoomOut.addEventListener('mousedown', function (e) { e.preventDefault(); startMove({ Pan: 0, Tilt: 0, Zoom: -0.3 }); });
-            zoomOut.addEventListener('mouseup', stopMove);
-            zoomOut.addEventListener('mouseleave', stopMove);
-            zoomOut.addEventListener('touchstart', function (e) {
-                e.preventDefault(); startMove({ Pan: 0, Tilt: 0, Zoom: -0.3 });
-            }, { passive: false });
-            zoomOut.addEventListener('touchend', stopMove);
-            zoomOut.addEventListener('touchcancel', stopMove);
-        }
-
-        /* Keyboard shortcuts: Arrow keys for PTZ when camera tab is active */
-        document.addEventListener('keydown', function (e) {
-            if (state.currentTab !== 'camera') return;
-            if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
-            var keyMap = {
-                ArrowUp: dirs.up, ArrowDown: dirs.down,
-                ArrowLeft: dirs.left, ArrowRight: dirs.right
-            };
-            if (keyMap[e.key]) {
-                e.preventDefault();
-                if (!state._keyMoving) {
-                    state._keyMoving = true;
-                    startMove(keyMap[e.key]);
-                }
-            }
-            if (e.key === '+' || e.key === '=') {
-                e.preventDefault();
-                if (!state._keyMoving) {
-                    state._keyMoving = true;
-                    startMove({ Pan: 0, Tilt: 0, Zoom: 0.3 });
-                }
-            }
-            if (e.key === '-') {
-                e.preventDefault();
-                if (!state._keyMoving) {
-                    state._keyMoving = true;
-                    startMove({ Pan: 0, Tilt: 0, Zoom: -0.3 });
-                }
-            }
-        });
-        document.addEventListener('keyup', function (e) {
-            if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', '+', '=', '-'].indexOf(e.key) !== -1) {
-                if (state._keyMoving) {
-                    state._keyMoving = false;
-                    stopMove();
-                }
-            }
-        });
-    }
-
-    function startMove(velocity) {
-        api('POST', '/api/ptz/move', velocity).catch(function (err) {
-            if (err.status !== 401) {
-                showToast('toast.ptzMove', { err: err.message }, { kind: 'error' });
-            }
-        });
-    }
-
-    function stopMove() {
-        api('POST', '/api/ptz/stop').catch(function () { /* best effort */ });
-    }
-
-    /* ======================================================================
-       Camera Tab — Presets
-       ====================================================================== */
-
-    function loadPresets() {
-        var container = $('#preset-list');
-        renderSkeleton(container, 2);
-        api('GET', '/api/ptz/presets').then(renderPresets).catch(function (err) {
-            if (err.status !== 401) {
-                renderErrorState(container, t('errors.loadFailed'), loadPresets);
-            } else {
-                renderPresets([]);
-            }
-        });
-    }
-
-    function renderPresets(presets) {
-        state.presetsRendered = true;
-        var container = $('#preset-list');
-        if (!container) return;
-        container.innerHTML = '';
-
-        if (!presets || !presets.length) {
-            var empty = el('div', { className: 'empty-state', id: 'preset-empty' });
-            empty.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="empty-icon"><path d="M21 10c0 7-9 13-9 13S3 17 3 10a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>';
-            empty.appendChild(el('p', { textContent: t('ptz.noPresets') }));
-            container.appendChild(empty);
-            return;
-        }
-
-        presets.forEach(function (p) {
-            var row = el('div', { className: 'preset-row', role: 'listitem' });
-
-            var info = el('div', { className: 'preset-info' });
-            var nameSpan = el('span', { className: 'preset-name', textContent: p.name || (t('ptz.presetName') + ' ' + p.token) });
-            nameSpan.style.cursor = 'pointer';
-            nameSpan.title = t('ptz.renamePreset');
-            nameSpan.addEventListener('dblclick', function () {
-                startRenamePreset(row, p.token, nameSpan);
-            });
-            info.appendChild(nameSpan);
-
-            var posText = 'Token: ' + p.token;
-            if (p.position) {
-                var pan = formatNumber(p.position.Pan || 0, 0.01);
-                var tilt = formatNumber(p.position.Tilt || 0, 0.01);
-                var zoom = formatNumber(p.position.Zoom || 0, 0.01);
-                posText = t('ptz.presetPos', { p: pan, t: tilt, z: zoom });
-            }
-            info.appendChild(el('span', { className: 'preset-pos mono', textContent: posText }));
-            row.appendChild(info);
-
-            var actions = el('div', { className: 'preset-actions' });
-            actions.appendChild(el('button', {
-                className: 'btn btn-sm',
-                textContent: t('ptz.goto'),
-                onClick: function () { gotoPreset(p.token); }
-            }));
-            actions.appendChild(el('button', {
-                className: 'btn btn-sm btn-danger',
-                textContent: t('ptz.delete'),
-                onClick: function () { deletePreset(p.token); }
-            }));
-            row.appendChild(actions);
-
-            container.appendChild(row);
-        });
-    }
-
-    function startRenamePreset(row, token, nameSpan) {
-        var currentName = nameSpan.textContent;
-        var input = el('input', {
-            className: 'form-input',
-            type: 'text',
-            value: currentName,
-            style: 'font-size:13px;padding:4px 8px;width:100%;'
-        });
-        nameSpan.replaceWith(input);
-        input.focus();
-        input.select();
-
-        function save() {
-            var newName = input.value.trim();
-            if (newName && newName !== currentName) {
-                renamePreset(token, newName);
-            } else {
-                nameSpan.textContent = currentName;
-                input.replaceWith(nameSpan);
-            }
-        }
-
-        input.addEventListener('blur', save);
-        input.addEventListener('keydown', function (e) {
-            if (e.key === 'Enter') { e.preventDefault(); save(); }
-            if (e.key === 'Escape') { input.value = currentName; save(); }
-        });
-    }
-
-    function renamePreset(token, newName) {
-        api('PUT', '/api/ptz/preset/' + encodeURIComponent(token), { name: newName })
-            .then(loadPresets)
-            .catch(function (err) {
-                if (err.status !== 401) {
-                    showToast('toast.presetAdd', { err: err.message }, { kind: 'error' });
-                    loadPresets();
-                }
-            });
-    }
-
-    function addPreset() {
-        var count = $$('#preset-list .preset-row').length;
-        api('POST', '/api/ptz/preset', { name: t('ptz.presetName') + ' ' + (count + 1) })
-            .then(loadPresets)
-            .catch(function (err) {
-                if (err.status !== 401) {
-                    showToast('toast.presetAdd', { err: err.message }, { kind: 'error' });
-                }
-            });
-    }
-
-    function gotoPreset(token) {
-        api('POST', '/api/ptz/preset/goto', { token: token }).catch(function (err) {
-            if (err.status !== 401) {
-                showToast('toast.presetGoto', { err: err.message }, { kind: 'error' });
-            }
-        });
-    }
-
-    function deletePreset(token) {
-        var confirmMsg = t('modal.confirmPresetDelete');
-        showConfirmModal(confirmMsg).then(function () {
-            api('DELETE', '/api/ptz/preset/' + encodeURIComponent(token))
-                .then(loadPresets)
-                .catch(function (err) {
-                    if (err.status !== 401) {
-                        showToast('toast.presetDelete', { err: err.message }, { kind: 'error' });
-                    }
-                });
-        }).catch(function () { /* cancelled — do nothing */ });
-    }
-
-    function initPresetControls() {
-        var btn = $('#btn-add-preset');
-        if (btn) btn.addEventListener('click', addPreset);
-        var resetBtn = $('#btn-reset-imaging');
-        if (resetBtn) resetBtn.addEventListener('click', resetImagingDefaults);
-    }
-
-    /* ======================================================================
        WebSocket (Control Channel)
        ====================================================================== */
 
@@ -2192,25 +1844,9 @@
             case 'param-changed':
                 applyParamUpdate(msg.name, msg.value);
                 break;
-            case 'ptz-position':
-                if (msg.position && msg.position.Pan !== undefined) {
-                    updatePTZDisplay(msg);
-                } else {
-                    fetchPTZStatus();
-                }
-                break;
-            case 'preset-list-changed':
-                loadPresets();
-                break;
-            case 'ptz-preset-added':
-                loadPresets();
-                break;
         }
     }
 
-    function fetchPTZStatus() {
-        api('GET', '/api/ptz/status').then(updatePTZDisplay).catch(function () { /* silent */ });
-    }
 
     function applyParamUpdate(name, value) {
         if (!name) return;
@@ -2276,8 +1912,9 @@
         initTopbar();
         initSidebar();
         initOnvifModal();
-        initPTZControls();
-        initPresetControls();
+        /* Bind reset defaults button */
+        var resetBtn = $('#btn-reset-imaging');
+        if (resetBtn) resetBtn.addEventListener('click', resetImagingDefaults);
         initLogout();
 
 		fetchVersion();
