@@ -28,7 +28,7 @@ MiBee Eye is a lightweight Go ONVIF camera service for single-board computers (R
 - **Web Admin UI** - Dark-themed admin panel with live preview, camera controls, and PTZ
 - **Digital PTZ** - Pan/tilt/zoom via software cropping
 - **Camera Controls** - Brightness, contrast, saturation, sharpness adjustment
-- **HLS Live Streaming** - H.264 video via ffmpeg RTSP→HLS for browser playback
+- **HLS Live Streaming** - Pure Go MPEG-TS segmenter for browser playback (no ffmpeg)
 - **i18n Support** - English/Chinese web UI
 - **Snapshot Support** - JPEG snapshots via HTTP endpoint
 - **Low Memory Footprint** - ~15-30MB RAM usage
@@ -146,7 +146,14 @@ flowchart TB
 ```
 Camera capture via CSI interface supports OV5647, IMX219, IMX708, IMX477 modules. RTSP server uses `gortsplib` (same as MediaMTX). ONVIF provides device discovery, media control, PTZ operations and imaging parameter adjustment. RTMP push supports cloud services.
 
-### Performance Comparison
+| Metric | MiBee Eye | MediaMTX | Improvement |
+|--------|---------|----------|-------------|
+| Memory Usage | **15–25 MB** | ~45 MB | 45–67% reduction |
+| ONVIF Server | ✅ **Profile S** (Device/Media/PTZ/Imaging) | ❌ Not supported | — |
+| CGO Dependencies | **Zero** | CGO required | Painless cross-compile |
+| Camera Control | ✅ Brightness, Contrast, WB, etc. | ❌ None | — |
+| RTMP Push | ✅ Built-in | ❌ Extra config needed | — |
+| CPU Usage (720p@15fps) | ~15% | ~24% | 37% reduction |
 
 | Metric | MiBee Eye | MediaMTX | Improvement |
 |--------|---------|----------|-------------|
@@ -157,19 +164,27 @@ Camera capture via CSI interface supports OV5647, IMX219, IMX708, IMX477 modules
 | RTMP Push | ✅ Built-in | ❌ Extra config needed | — |
 | CPU Usage (720p@15fps) | ~15% | ~24% | 37% reduction |
 
-*Memory usage includes ~15MB extra for HLS ffmpeg process when active.*
+| Component | Library | Rationale |
+|-----------|---------|-----------|
+| ONVIF Server | Hand-written SOAP | Pure Go, full Device/Media/PTZ/Imaging |
+| RTSP Server | `bluenviron/gortsplib/v5` | Same as MediaMTX, proven compatibility |
+| RTMP Push | Pure Go implementation | Active maintenance, low footprint |
+| Camera Capture | MediaMTX rpicam (subprocess) | Battle-tested libcamera, no CGO |
+| HLS Bridge | Pure Go MPEG-TS segmenter | No external dependencies, lightweight |
+| Web UI | embedded (no external lib) + hls.js | Lightweight, no external dependencies |
+| Configuration | YAML | Human-readable, easy deployment |
 ### Technology Stack
 
 | Component | Library | Rationale |
 |-----------|---------|-----------|
-| ONVIF Server | `0x524a/onvif-go` | Pure Go, full Device/Media/PTZ/Imaging |
+| ONVIF Server | Hand-written SOAP | Pure Go, full Device/Media/PTZ/Imaging |
 | RTSP Server | `bluenviron/gortsplib/v5` | Same as MediaMTX, proven compatibility |
-| RTMP Push | `q191201771/lal` | Pure Go, active maintenance, low footprint |
+| RTMP Push | Pure Go implementation | Active maintenance, low footprint |
 | Camera Capture | MediaMTX rpicam (subprocess) | Battle-tested libcamera, no CGO |
-| HLS Bridge | `ffmpeg` subprocess | Converts RTSP→HLS for browser playback |
+| HLS Bridge | Pure Go MPEG-TS segmenter | No external dependencies, lightweight |
 | Web UI | embedded (no external lib) + hls.js | Lightweight, no external dependencies |
 | Configuration | YAML | Human-readable, easy deployment |
-Built with pure Go — **zero CGO**. Camera capture uses MediaMTX's existing mtxrpicam binary via subprocess pipe for proven CSI camera support, without the CGO cross-compile pain.
+Built with pure Go — **zero CGO**. Camera capture uses MediaMTX's existing mtxrpicam binary via subprocess pipe for proven CSI camera support, without the CGO cross-compile pain. All protocols (ONVIF, RTMP, HLS, Snapshot) are implemented in pure Go without external libraries.
 
 ## Development
 

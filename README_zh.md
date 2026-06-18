@@ -25,7 +25,7 @@ MiBee Eye 是一个轻量级的 Go ONVIF 相机服务，支持树莓派、香蕉
 - **RTSP 流媒体** - H.264 视频流，支持可配置的分辨率和码率
 - **RTMP 推流** - 推送到阿里云、Twitch、YouTube 等云服务
 - **WS-Discovery** - 网络自动发现相机
-- **HLS 直播流** - 通过 FFmpeg 子进程提供 Web 直播流支持
+- **HLS 直播流** - 纯 Go MPEG-TS 分段器，支持 Web 直播流（无 ffmpeg 依赖）
 - **国际化支持** - 中英文界面切换 (i18n)
 - **Web 管理界面** - 基于 token 认证的登录页面，支持 HLS 视频播放器，语言和主题切换，快照功能
 - **数字 PTZ** - 通过软件裁剪实现平移/倾斜/缩放
@@ -126,7 +126,7 @@ flowchart TB
     subgraph MiBee Eye
         CAP["相机捕获"]
         RTSP["RTSP 服务器"]
-        HLS["HLS 直播桥 (FFmpeg) "]
+        HLS["HLS 直播桥 (纯 Go) "]
         ONVIF["ONVIF 服务"]
         RTMP["RTMP 推流"]
         CTRL["相机控制"]
@@ -158,6 +158,13 @@ flowchart TB
 | 指标 | MiBee Eye | MediaMTX | 改善 |
 |--------|---------|----------|-------------|
 | 内存占用 | **15–25 MB** | ~45 MB | 降低 45–67% |
+| ONVIF 服务端 | ✅ **Profile S**（设备/媒体/PTZ/成像） | ❌ 不支持 | — |
+| CGO 依赖 | **零 CGO** | 需要 CGO | 交叉编译无痛 |
+| 相机控制 | ✅ 亮度、对比度、白平衡等 | ❌ 无 | — |
+| RTMP 推流 | ✅ 内置 | ❌ 无 | — |
+| CPU 使用率（720p@15fps） | ~15% | ~24% | 降低 37% |
+|--------|---------|----------|-------------|
+| 内存占用 | **15–25 MB** | ~45 MB | 降低 45–67% |
 | 内存占用 (HLS) | **30–40 MB** | ~45 MB | 降低 33–55% |
 | ONVIF 服务端 | ✅ **Profile S**（设备/媒体/PTZ/成像） | ❌ 不支持 | — |
 || CGO 依赖 | **零 CGO** | 需要 CGO | 交叉编译无痛 |
@@ -167,18 +174,18 @@ flowchart TB
 | CPU 使用率（720p@15fps） | ~15% | ~24% | 降低 37% |
 ### 技术栈
 
-### 技术栈
-
 | 组件 | 库 | 选择理由 |
 |-----------|---------|-----------|
-| ONVIF 服务端 | `0x524a/onvif-go` | 纯 Go，完整的 Device/Media/PTZ/Imaging |
+| ONVIF 服务端 | 手写 SOAP | 纯 Go，完整的 Device/Media/PTZ/Imaging |
 | RTSP 服务器 | `bluenviron/gortsplib/v5` | MediaMTX 同款库，兼容性有保证 |
-| RTMP 推流 | `q191201771/lal` | Go 原生，资源占用低，维护活跃 |
-| HLS 直播桥 | FFmpeg (子进程) | 业界标准，兼容性极佳 |
+| RTMP 推流 | 纯 Go 实现 | Go 原生，资源占用低，维护活跃 |
+| HLS 直播桥 | 纯 Go MPEG-TS 分段器 | 无外部依赖，轻量级 |
+| 快照功能 | 纯 Go JPEG 编码器 | 无 ffmpeg 依赖 |
 | Web UI | hls.js + Bootstrap | 流畅播放体验，响应式设计 |
-|| 相机捕获 | MediaMTX rpicam（子进程） | 经过验证的 libcamera 接口，无需 CGO |
+| 相机捕获 | MediaMTX rpicam（子进程） | 经过验证的 libcamera 接口，无需 CGO |
 | 配置管理 | YAML | 人类可读，易于部署 |
-纯 Go 构建 — **零 CGO 依赖**。相机采集通过子进程调用 MediaMTX 的 mtxrpicam 二进制文件，既利用了成熟的 libcamera 接口，又避免了 CGO 交叉编译的麻烦。
+纯 Go 构建 — **零 CGO 依赖**。相机采集通过子进程调用 MediaMTX 的 mtxrpicam 二进制文件，既利用了成熟的 libcamera 接口，又避免了 CGO 交叉编译的麻烦。所有协议（ONVIF、RTMP、HLS、快照）均由纯 Go 实现，无需外部库。
+纯 Go 构建 — **零 CGO 依赖**。相机采集通过子进程调用 MediaMTX 的 mtxrpicam 二进制文件，既利用了成熟的 libcamera 接口，又避免了 CGO 交叉编译的麻烦。所有协议（ONVIF、RTMP、HLS、快照）均由纯 Go 实现，无需外部库。
 
 ## 开发
 
