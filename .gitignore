@@ -33,5 +33,6 @@ coverage.html
 # Project-specific
 AGENTS.md
 .omo/
+.mimocode/
 docs/blog/
 docs/handoff/

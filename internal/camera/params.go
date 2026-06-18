@@ -44,14 +44,8 @@ type Params struct {
 	Codec                 string
 	IDRPeriod             uint32
 	Bitrate               uint32
-	HardwareH264Profile   string
-	HardwareH264Level     string
-	SoftwareH264Profile   string
-	SoftwareH264Level     string
-	SecondaryWidth        uint32
-	SecondaryHeight       uint32
-	SecondaryFPS          float32
-	SecondaryMJPEGQuality uint32
+	Profile               string
+	Level                 string
 }
 
 // DefaultParams returns params with sensible defaults for OV5647 on RPi 3B.
@@ -71,7 +65,7 @@ func DefaultParams() Params {
 		Denoise:       "auto",
 		Bitrate:       2000000,
 		LogLevel:      "info",
-		HardwareH264Profile: "main",
-		HardwareH264Level:   "4.1",
+		Profile:              "main",
+		Level:                "4.1",
 	}
 }

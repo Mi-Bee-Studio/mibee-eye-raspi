@@ -174,6 +174,7 @@ adapter := &configAdapter{cfg: cfg, deviceIP: localIP}
 	// --- Step 2: H264 Parser + AUHub ---
 	parser := h264.NewParser()
 	auHub := h264.NewAUHub()
+	auHub.StartDropLogger(ctx)
 
 	go func() {
 		for frame := range cam.Frames() {

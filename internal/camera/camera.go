@@ -525,7 +525,7 @@ func (c *RPiCamera) readLoop() {
 			// Ready signal — subprocess is ready to capture
 			continue
 
-		case 'd':
+		case 'b': // v1.11.3 binary uses 'b' (master renamed to 'd')
 			// Video frame data
 			if len(buf) < 9 {
 				continue

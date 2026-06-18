@@ -2,7 +2,9 @@ package h264
 
 import (
 	"context"
+	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -26,6 +28,7 @@ type AUHub struct {
 	mu          sync.Mutex
 	subscribers map[string]*Subscriber
 	nextID      int
+	droppedAUs  atomic.Uint64 // total dropped AUs across all subscribers
 }
 
 // NewAUHub creates a new access-unit fan-out hub.
@@ -33,6 +36,28 @@ func NewAUHub() *AUHub {
 	return &AUHub{
 		subscribers: make(map[string]*Subscriber),
 	}
+}
+
+// StartDropLogger periodically logs dropped AU statistics.
+// Call once at startup; cancel via ctx to stop.
+func (h *AUHub) StartDropLogger(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		var last uint64
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				cur := h.droppedAUs.Load()
+				if cur > last {
+					log.Printf("h264: %d AUs dropped in last 30s (slow subscribers)", cur-last)
+					last = cur
+				}
+			}
+		}
+	}()
 }
 
 // Write adds an access unit to the hub for distribution.
@@ -46,8 +71,14 @@ func (h *AUHub) Write(au AccessUnit) {
 		case sub.Channel <- au:
 		default:
 			// Subscriber too slow — drop frame to avoid blocking the writer.
+			h.droppedAUs.Add(1)
 		}
 	}
+}
+
+// DroppedAUs returns the total number of access units dropped due to slow subscribers.
+func (h *AUHub) DroppedAUs() uint64 {
+	return h.droppedAUs.Load()
 }
 
 // Subscribe registers a new subscriber and returns it.

@@ -76,8 +76,9 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	s.rtspServer = &gortsplib.Server{
-		Handler:     s,
-		RTSPAddress: addr,
+		Handler:        s,
+		RTSPAddress:    addr,
+		WriteQueueSize: 2048, // 256 default too small for WiFi clients; 2048 ≈ 27s buffer at 75 pkt/s
 	}
 
 	// Start in background
@@ -152,6 +153,13 @@ func (s *Server) OnConnOpen(_ *gortsplib.ServerHandlerOnConnOpenCtx) {
 
 // OnConnClose is called when an RTSP connection is closed.
 func (s *Server) OnConnClose(_ *gortsplib.ServerHandlerOnConnCloseCtx) {
+}
+
+// OnStreamWriteError handles per-packet write errors (e.g., "write queue is full").
+// Without this, gortsplib falls back to log.Println for EVERY dropped packet —
+// causing thousands of log lines per minute when a client is slow or disconnected.
+// We silently drop: the server's ReadTimeout (10s) will clean up zombie connections.
+func (s *Server) OnStreamWriteError(_ *gortsplib.ServerHandlerOnStreamWriteErrorCtx) {
 }
 
 // OnSessionOpen is called when a new RTSP session is opened.
