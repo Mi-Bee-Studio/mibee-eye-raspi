@@ -7,11 +7,11 @@ Conflicts=mediamtx.service
 
 [Service]
 Type=simple
-User=pi
-Environment=LD_LIBRARY_PATH=/home/pi/mibee-eye/deploy/bin
+User=mickey
+Environment=LD_LIBRARY_PATH=/home/mickey/mibee-eye/deploy/bin
 Environment=LIBCAMERA_IPA_CONFIG_PATH=/usr/share/libcamera/ipa
-WorkingDirectory=/home/pi/mibee-eye
-ExecStart=/home/pi/mibee-eye/mibee-eye -config /home/pi/mibee-eye/config.yaml
+WorkingDirectory=/home/mickey/mibee-eye
+ExecStart=/home/mickey/mibee-eye/mibee-eye -config /home/mickey/mibee-eye/config.yaml
 Restart=always
 RestartSec=5
 
