@@ -6,7 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -37,7 +37,6 @@ const (
 	loginBlockDuration = 5 * time.Minute
 )
 
-
 // session represents an authenticated user session.
 type session struct {
 	username  string
@@ -56,9 +55,10 @@ type SessionStore struct {
 
 // NewSessionStore creates a new session store with the given credentials.
 // Tokens are issued via Login and validated via Validate.
-func NewSessionStore(username, password string) *SessionStore {
+// Returns an error if the password is empty.
+func NewSessionStore(username, password string) (*SessionStore, error) {
 	if password == "" {
-		log.Printf("WARNING: ONVIF password is empty. Set onvif.password in config or MIBEE_EYE_ONVIF_PASSWORD env var")
+		return nil, errors.New("web: password must not be empty. Set web.password or MIBEE_EYE_WEB_PASSWORD")
 	}
 	s := &SessionStore{
 		sessions: make(map[string]session),
@@ -66,7 +66,7 @@ func NewSessionStore(username, password string) *SessionStore {
 		password: password,
 	}
 	go s.cleanup()
-	return s
+	return s, nil
 }
 
 // Login validates credentials and returns a new bearer token on success.
@@ -224,40 +224,36 @@ func extractIP(r *http.Request) string {
 	return ip
 }
 
-
-// extractToken returns the bearer token from the request and whether it came from query param.
-// It checks (in order): Authorization: Bearer header, ?token= query string.
-func extractToken(r *http.Request) (string, bool) {
+// extractToken returns the bearer token from the Authorization header.
+// For WebSocket upgrade requests (which cannot set custom headers in browsers),
+// the token may also be passed via the ?token= query parameter.
+func extractToken(r *http.Request) string {
 	auth := r.Header.Get("Authorization")
-	if auth != "" {
-		if strings.HasPrefix(auth, "Bearer ") {
-			return strings.TrimPrefix(auth, "Bearer "), false
+	if strings.HasPrefix(auth, "Bearer ") {
+		return strings.TrimPrefix(auth, "Bearer ")
+	}
+
+	// Browser WebSocket API cannot set Authorization header.
+	// Allow token via query parameter ONLY for WebSocket upgrade requests.
+	if isWebSocketUpgrade(r) {
+		if token := r.URL.Query().Get("token"); token != "" {
+			return token
 		}
 	}
-	if token := r.URL.Query().Get("token"); token != "" {
-		return token, true
-	}
-	return "", false
+	return ""
 }
 
-// authMiddleware wraps the entire mux. Routes that don't require auth
-// (login, static assets, index) are handled normally; everything else
-// delegates to the per-route authRequired wrapper.
-func (s *Server) authMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		next.ServeHTTP(w, r)
-	})
+// isWebSocketUpgrade returns true if the request is a WebSocket upgrade request.
+func isWebSocketUpgrade(r *http.Request) bool {
+	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket") &&
+		strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade")
 }
 
 // authRequired wraps a handler with bearer-token validation.
-// Returns 401 JSON on missing/invalid token (no more browser Basic Auth dialog).
+// Returns 401 JSON on missing/invalid token.
 func (s *Server) authRequired(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		token, fromQuery := extractToken(r)
-		if fromQuery {
-			s.logger.Printf("web: DEPRECATED: token via query parameter (use Authorization: Bearer header instead)")
-			w.Header().Set("Deprecation-Warning", "Token in URL query parameter is deprecated. Use Authorization: Bearer header instead.")
-		}
+		token := extractToken(r)
 		if _, err := s.sessions.Validate(token); err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
@@ -300,13 +296,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	token, expires, err := s.sessions.Login(req.Username, req.Password)
 	if err != nil {
 		s.loginLimiter.recordFailure(ip)
-		s.logger.Printf("web: login failed for user %q", req.Username)
+		slog.Warn("web: login failed", "user", req.Username)
 		writeError(w, http.StatusUnauthorized, "invalid username or password")
 		return
 	}
 
 	s.loginLimiter.recordSuccess(ip)
-	s.logger.Printf("web: login OK for user %q (active sessions: %d)", req.Username, s.sessions.Count())
+	slog.Info("web: login OK", "user", req.Username, "active_sessions", s.sessions.Count())
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"token":      token,
 		"username":   req.Username,
@@ -314,17 +310,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		"expires_in": int(sessionTTL.Seconds()),
 	})
 }
-
-// handleLogout invalidates the caller's bearer token.
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	token, fromQuery := extractToken(r)
-	if fromQuery {
-		s.logger.Printf("web: DEPRECATED: token via query parameter (use Authorization: Bearer header instead)")
-		w.Header().Set("Deprecation-Warning", "Token in URL query parameter is deprecated. Use Authorization: Bearer header instead.")
-	}
+	token := extractToken(r)
 	if username, err := s.sessions.Validate(token); err == nil {
 		s.sessions.Logout(token)
-		s.logger.Printf("web: logout OK for user %q (active sessions: %d)", username, s.sessions.Count())
+		slog.Info("web: logout OK", "user", username, "active_sessions", s.sessions.Count())
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

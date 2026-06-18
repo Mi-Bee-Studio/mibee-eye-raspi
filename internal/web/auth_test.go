@@ -10,18 +10,23 @@ import (
 	"testing"
 )
 
-func newTestServer(user, pass string) *Server {
+func newTestServer(t *testing.T, user, pass string) *Server {
+	t.Helper()
+	s, err := NewSessionStore(user, pass)
+	if err != nil {
+		t.Fatalf("NewSessionStore: %v", err)
+	}
 	return &Server{
 		username: user,
 		password: pass,
-		sessions: NewSessionStore(user, pass),
+		sessions: s,
 		logger:   log.New(io.Discard, "", 0),
 		loginLimiter: &loginRateLimiter{attempts: make(map[string]*rateLimitEntry)},
 	}
 }
 
 func TestSessionStore_LoginSuccess(t *testing.T) {
-	s := newTestServer("admin", "admin123")
+	s := newTestServer(t, "admin", "admin123")
 	token, _, err := s.sessions.Login("admin", "admin123")
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
@@ -39,7 +44,7 @@ func TestSessionStore_LoginSuccess(t *testing.T) {
 }
 
 func TestSessionStore_LoginBadPassword(t *testing.T) {
-	s := newTestServer("admin", "admin123")
+	s := newTestServer(t, "admin", "admin123")
 	_, _, err := s.sessions.Login("admin", "wrong")
 	if err == nil {
 		t.Fatal("expected error for wrong password")
@@ -47,7 +52,7 @@ func TestSessionStore_LoginBadPassword(t *testing.T) {
 }
 
 func TestSessionStore_LoginBadUsername(t *testing.T) {
-	s := newTestServer("admin", "admin123")
+	s := newTestServer(t, "admin", "admin123")
 	_, _, err := s.sessions.Login("root", "admin123")
 	if err == nil {
 		t.Fatal("expected error for wrong username")
@@ -55,15 +60,14 @@ func TestSessionStore_LoginBadUsername(t *testing.T) {
 }
 
 func TestSessionStore_EmptyPassword(t *testing.T) {
-	s := newTestServer("admin", "")
-	_, _, err := s.sessions.Login("admin", "")
-	if err != nil {
-		t.Fatalf("Login with empty password should work: %v", err)
+	_, err := NewSessionStore("admin", "")
+	if err == nil {
+		t.Fatal("expected error for empty password")
 	}
 }
 
 func TestSessionStore_InvalidateOnLogout(t *testing.T) {
-	s := newTestServer("admin", "admin123")
+	s := newTestServer(t, "admin", "admin123")
 	token, _, _ := s.sessions.Login("admin", "admin123")
 
 	if _, err := s.sessions.Validate(token); err != nil {
@@ -78,7 +82,7 @@ func TestSessionStore_InvalidateOnLogout(t *testing.T) {
 }
 
 func TestAuthMiddleware_BearerHeader(t *testing.T) {
-	s := newTestServer("admin", "admin123")
+	s := newTestServer(t, "admin", "admin123")
 	token, _, _ := s.sessions.Login("admin", "admin123")
 
 	called := false
@@ -122,21 +126,25 @@ func TestAuthMiddleware_BearerHeader(t *testing.T) {
 }
 
 func TestAuthMiddleware_QueryToken(t *testing.T) {
-	s := newTestServer("admin", "admin123")
-	token, _, _ := s.sessions.Login("admin", "admin123")
+	s := newTestServer(t, "admin", "admin123")
 
 	called := false
 	handler := s.authRequired(func(w http.ResponseWriter, r *http.Request) {
 		called = true
 	})
 
-	req := httptest.NewRequest("GET", "/ws?token="+token, nil)
+	// Query param token is no longer accepted — expect 401
+	req := httptest.NewRequest("GET", "/ws?token=some-token", nil)
 	rr := httptest.NewRecorder()
 	handler(rr, req)
-	if !called {
-		t.Error("handler should be called with ?token= query param")
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for ?token= query param, got %d", rr.Code)
+	}
+	if called {
+		t.Error("handler should not be called with query param token")
 	}
 
+	// Empty query param also returns 401
 	req = httptest.NewRequest("GET", "/ws?token=", nil)
 	rr = httptest.NewRecorder()
 	handler(rr, req)
@@ -146,7 +154,7 @@ func TestAuthMiddleware_QueryToken(t *testing.T) {
 }
 
 func TestHandleLogin_HTTP(t *testing.T) {
-	s := newTestServer("admin", "admin123")
+	s := newTestServer(t, "admin", "admin123")
 
 	body := `{"username":"admin","password":"admin123"}`
 	req := httptest.NewRequest("POST", "/api/login", strings.NewReader(body))
@@ -171,7 +179,7 @@ func TestHandleLogin_HTTP(t *testing.T) {
 }
 
 func TestHandleLogin_HTTPWrongPassword(t *testing.T) {
-	s := newTestServer("admin", "admin123")
+	s := newTestServer(t, "admin", "admin123")
 	body := `{"username":"admin","password":"WRONG"}`
 	req := httptest.NewRequest("POST", "/api/login", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -184,7 +192,7 @@ func TestHandleLogin_HTTPWrongPassword(t *testing.T) {
 }
 
 func TestHandleLogin_HTTPEmptyFields(t *testing.T) {
-	s := newTestServer("admin", "admin123")
+	s := newTestServer(t, "admin", "admin123")
 	tests := []struct {
 		name string
 		body string
@@ -208,7 +216,13 @@ func TestHandleLogin_HTTPEmptyFields(t *testing.T) {
 
 func TestHandleLogin_HTTPEmptyStoredPassword(t *testing.T) {
 	// When no password is configured, login should be rejected with a specific message.
-	s := newTestServer("admin", "")
+	// Can't use newTestServer because NewSessionStore rejects empty passwords.
+	s := &Server{
+		username: "admin",
+		password: "",
+		logger:   log.New(io.Discard, "", 0),
+		loginLimiter: &loginRateLimiter{attempts: make(map[string]*rateLimitEntry)},
+	}
 	tests := []struct {
 		name string
 		body string
@@ -233,7 +247,7 @@ func TestHandleLogin_HTTPEmptyStoredPassword(t *testing.T) {
 }
 
 func TestHandleLogin_HTTPInvalidBody(t *testing.T) {
-	s := newTestServer("admin", "admin123")
+	s := newTestServer(t, "admin", "admin123")
 	req := httptest.NewRequest("POST", "/api/login", strings.NewReader("not json"))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
@@ -244,7 +258,7 @@ func TestHandleLogin_HTTPInvalidBody(t *testing.T) {
 }
 
 func TestHandleLogout_HTTP(t *testing.T) {
-	s := newTestServer("admin", "admin123")
+	s := newTestServer(t, "admin", "admin123")
 	token, _, _ := s.sessions.Login("admin", "admin123")
 
 	req := httptest.NewRequest("POST", "/api/logout", nil)
@@ -264,58 +278,55 @@ func TestHandleLogout_HTTP(t *testing.T) {
 
 func TestExtractToken_Priorities(t *testing.T) {
 	headerToken := "header-token"
-	queryToken := "query-token"
 
-	// Both header and query param: header wins, not from query
-	req := httptest.NewRequest("GET", "/ws?token="+queryToken, nil)
+	// Header token present — extracts from header
+	req := httptest.NewRequest("GET", "/ws?token=query-token", nil)
 	req.Header.Set("Authorization", "Bearer "+headerToken)
-	tok, fromQuery := extractToken(req)
+	tok := extractToken(req)
 	if tok != headerToken {
-		t.Errorf("expected header token to win, got %q", tok)
-	}
-	if fromQuery {
-		t.Error("expected fromQuery=false when header wins over query")
+		t.Errorf("expected header token, got %q", tok)
 	}
 
-	// Only query param
-	req = httptest.NewRequest("GET", "/ws?token="+queryToken, nil)
-	tok, fromQuery = extractToken(req)
-	if tok != queryToken {
-		t.Errorf("expected query token, got %q", tok)
-	}
-	if !fromQuery {
-		t.Error("expected fromQuery=true when token is from query param")
+	// No header, query param ignored — returns empty
+	req = httptest.NewRequest("GET", "/ws?token=query-token", nil)
+	tok = extractToken(req)
+	if tok != "" {
+		t.Errorf("expected empty token (query param ignored), got %q", tok)
 	}
 
 	// Only header
 	req = httptest.NewRequest("GET", "/ws", nil)
 	req.Header.Set("Authorization", "Bearer "+headerToken)
-	tok, fromQuery = extractToken(req)
+	tok = extractToken(req)
 	if tok != headerToken {
 		t.Errorf("expected header token, got %q", tok)
-	}
-	if fromQuery {
-		t.Error("expected fromQuery=false when token is from header")
 	}
 
 	// No token at all
 	req = httptest.NewRequest("GET", "/ws", nil)
-	tok, fromQuery = extractToken(req)
+	tok = extractToken(req)
 	if tok != "" {
 		t.Errorf("expected empty token, got %q", tok)
 	}
-	if fromQuery {
-		t.Error("expected fromQuery=false when no token present")
+
+	// WebSocket upgrade request — query param token accepted
+	wsToken := "ws-query-token"
+	req = httptest.NewRequest("GET", "/ws?token="+wsToken, nil)
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Connection", "Upgrade")
+	tok = extractToken(req)
+	if tok != wsToken {
+		t.Errorf("expected ws query token for upgrade request, got %q", tok)
 	}
 }
 
 func TestSessionStore_LogoutUnknownToken(t *testing.T) {
-	s := newTestServer("admin", "admin123")
+	s := newTestServer(t, "admin", "admin123")
 	s.sessions.Logout("never-issued-token")
 }
 
 func TestHandleLogin_ResponseShape(t *testing.T) {
-	s := newTestServer("admin", "admin123")
+	s := newTestServer(t, "admin", "admin123")
 	body := `{"username":"admin","password":"admin123"}`
 	req := httptest.NewRequest("POST", "/api/login", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -342,7 +353,7 @@ func TestHandleLogin_ResponseShape(t *testing.T) {
 }
 
 func TestRateLimiter_UnderLimit(t *testing.T) {
-	s := newTestServer("admin", "admin123")
+	s := newTestServer(t, "admin", "admin123")
 	ip := "192.168.1.1"
 
 	// 9 failed logins — all should return 401 (not blocked).
@@ -374,7 +385,7 @@ func TestRateLimiter_UnderLimit(t *testing.T) {
 }
 
 func TestRateLimiter_Blocked(t *testing.T) {
-	s := newTestServer("admin", "admin123")
+	s := newTestServer(t, "admin", "admin123")
 	ip := "192.168.1.1"
 
 	// 10 failed logins.
@@ -403,7 +414,7 @@ func TestRateLimiter_Blocked(t *testing.T) {
 }
 
 func TestRateLimiter_ResetOnSuccess(t *testing.T) {
-	s := newTestServer("admin", "admin123")
+	s := newTestServer(t, "admin", "admin123")
 	ip := "192.168.1.1"
 
 	// 8 failures.
@@ -488,7 +499,7 @@ func TestSecurityHeaders(t *testing.T) {
 }
 
 func TestAuthMiddleware_BearerHeaderNoDeprecationWarning(t *testing.T) {
-	s := newTestServer("admin", "admin123")
+	s := newTestServer(t, "admin", "admin123")
 	token, _, _ := s.sessions.Login("admin", "admin123")
 
 	handler := s.authRequired(func(w http.ResponseWriter, r *http.Request) {
@@ -508,26 +519,23 @@ func TestAuthMiddleware_BearerHeaderNoDeprecationWarning(t *testing.T) {
 	}
 }
 
-func TestAuthMiddleware_QueryTokenDeprecationWarning(t *testing.T) {
-	s := newTestServer("admin", "admin123")
-	token, _, _ := s.sessions.Login("admin", "admin123")
+func TestAuthMiddleware_QueryTokenRejected(t *testing.T) {
+	s := newTestServer(t, "admin", "admin123")
 
 	handler := s.authRequired(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	req := httptest.NewRequest("GET", "/api/test?token="+token, nil)
+	// Query param token is no longer accepted — returns 401
+	req := httptest.NewRequest("GET", "/api/test?token=some-token", nil)
 	rr := httptest.NewRecorder()
 	handler(rr, req)
 
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200 (backward compatible), got %d", rr.Code)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for query param token, got %d", rr.Code)
 	}
-	if h := rr.Header().Get("Deprecation-Warning"); h == "" {
-		t.Error("expected Deprecation-Warning header for query token")
-	}
-
 }
+
 func TestCredentialStrippedFromURL(t *testing.T) {
 	handler := securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

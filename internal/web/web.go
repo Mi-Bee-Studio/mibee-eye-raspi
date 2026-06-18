@@ -12,58 +12,48 @@ import (
 	"time"
 
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/camera"
+	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/config"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/h264"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/ptz"
 )
-// OnvifConfigProvider provides read-only access to ONVIF, RTSP, device, and camera configuration.
-type OnvifConfigProvider interface {
-	ONVIFPort() int
-	ONVIFUsername() string
-	ONVIFPassword() string
-	RTSPPort() int
-	DeviceIP() string
-	CameraDevice() string
-	CameraCodec() string
-	CameraBitrate() int
-	CameraWidth() int
-	CameraHeight() int
-	CameraFPS() int
-	DeviceName() string
-	DeviceManufacturer() string
-	DeviceModel() string
-	DeviceFirmware() string
-	DeviceHardwareID() string
-	DeviceSerialNumber() string
-	LoggingLevel() string
-}
 
 // Config holds the web server configuration.
 type Config struct {
-	Port        int                 // listen port (default 8088)
-	Username    string              // basic-auth user (default = onvif user)
-	Password    string              // basic-auth pass (default = onvif pass)
-	ConfigPath  string              // path to config.yaml (used by /api/config/onvif)
-	OnvifConfig OnvifConfigProvider // read-only onvif/rtsp config
-	Params      *camera.ParamManager
-	PTZ         *ptz.State
-	AUHub       *h264.AUHub
-	Version     string              // build version from ldflags
-	Logger      *log.Logger // nil -> log.Default()
+	Port           int                   // listen port (default 8088)
+	Username       string                // basic-auth user (default = onvif user)
+	Password       string                // basic-auth pass (default = onvif pass)
+	AllowedOrigins []string              // CORS allowed origins (default ["*"])
+	ConfigPath     string                // path to config.yaml (used by /api/config/onvif)
+	OnvifConfig    config.ConfigProvider  // read-only onvif/rtsp config
+	Params         *camera.ParamManager
+	PTZ            *ptz.State
+	AUHub          *h264.AUHub
+	Version        string                // build version from ldflags
+	Logger         *log.Logger            // nil -> log.Default()
+	ReadHeaderTimeout time.Duration        // http.Server.ReadHeaderTimeout (0 = default 5s)
+	ReadTimeout       time.Duration        // http.Server.ReadTimeout (0 = default 10s)
+	WriteTimeout      time.Duration        // http.Server.WriteTimeout (0 = default 30s)
+	IdleTimeout       time.Duration        // http.Server.IdleTimeout (0 = default 120s)
+	CameraStatus func() bool    // returns camera alive status (nil = unavailable)
+	RTSPStatus   func() bool    // returns RTSP server status (nil = unavailable)
+	FrameRate    func() float64 // returns current fps (nil = unavailable)
+	Snapshot     http.Handler    // GET /snapshot handler (nil = disabled)
 }
 
 // Server is the web UI HTTP server.
 type Server struct {
-	cfg    Config
-	logger *log.Logger
-	mux    *http.ServeMux
-	hub    *wsHub
+	cfg          Config
+	logger       *log.Logger
+	mux          *http.ServeMux
+	hub          *wsHub
 	loginLimiter *loginRateLimiter
-	server *http.Server
+	server       *http.Server
 
-	username string
-	password string
-	sessions *SessionStore
-	startTime time.Time
+	username       string
+	password       string
+	sessions       *SessionStore
+	allowedOrigins []string
+	startTime      time.Time
 }
 
 // New creates a new web server.
@@ -82,13 +72,25 @@ func New(cfg Config) *Server {
 		password = cfg.OnvifConfig.ONVIFPassword()
 	}
 
+	sess, err := NewSessionStore(username, password)
+	if err != nil {
+		// This should not happen if password validation is done earlier, but guard anyway.
+		logger.Fatalf("web: %v", err)
+	}
+
+	origins := cfg.AllowedOrigins
+	if len(origins) == 0 {
+		origins = []string{"*"}
+	}
+
 	return &Server{
-		cfg:      cfg,
-		logger:   logger,
-		username: username,
-		password: password,
-		sessions: NewSessionStore(username, password),
-		loginLimiter: &loginRateLimiter{attempts: make(map[string]*rateLimitEntry)},
+		cfg:             cfg,
+		logger:          logger,
+		username:        username,
+		password:        password,
+		sessions:        sess,
+		allowedOrigins:  origins,
+		loginLimiter:    &loginRateLimiter{attempts: make(map[string]*rateLimitEntry)},
 	}
 }
 
@@ -129,13 +131,29 @@ func (s *Server) Start(ctx context.Context) error {
 	s.registerRoutes()
 
 	addr := net.JoinHostPort("0.0.0.0", strconv.Itoa(port))
+	readHeaderTimeout := s.cfg.ReadHeaderTimeout
+	if readHeaderTimeout == 0 {
+		readHeaderTimeout = 5 * time.Second
+	}
+	readTimeout := s.cfg.ReadTimeout
+	if readTimeout == 0 {
+		readTimeout = 10 * time.Second
+	}
+	writeTimeout := s.cfg.WriteTimeout
+	if writeTimeout == 0 {
+		writeTimeout = 30 * time.Second
+	}
+	idleTimeout := s.cfg.IdleTimeout
+	if idleTimeout == 0 {
+		idleTimeout = 120 * time.Second
+	}
 	s.server = &http.Server{
 		Addr:              addr,
-		Handler:           securityHeaders(s.mux),
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       120 * time.Second,
+		Handler:           s.corsMiddleware(securityHeaders(s.mux)),
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
 	}
 
 	errCh := make(chan error, 1)
@@ -198,12 +216,22 @@ func (s *Server) registerRoutes() {
 	m.HandleFunc("DELETE /api/ptz/preset/{token}", s.authRequired(s.handleDeletePTZPreset))
 	m.HandleFunc("PUT /api/ptz/preset/{token}", s.authRequired(s.handlePutPTZPreset))
 
-	// WebSocket — auth via ?token= query string
+	// WebSocket — auth via Authorization header
 	m.HandleFunc("GET /ws", s.authRequired(s.handleWS))
 
-	// H.264 video stream via WebSocket — auth via ?token= query string
+	// H.264 video stream via WebSocket — auth via Authorization header
 	m.HandleFunc("GET /api/stream/ws", s.authRequired(s.handleStreamWS))
 
+	// Snapshot endpoint — no auth (camera image, served to NVRs and web UI)
+	if s.cfg.Snapshot != nil {
+		m.HandleFunc("GET /snapshot", s.cfg.Snapshot.ServeHTTP)
+	}
+}
+
+// Mux returns the server's ServeMux, allowing external packages to register routes.
+// The returned mux is nil until Start() is called.
+func (s *Server) Mux() *http.ServeMux {
+	return s.mux
 }
 
 // wsEvent represents a WebSocket event to broadcast.
@@ -274,6 +302,44 @@ func securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
+// corsMiddleware restricts CORS access to allowed origins.
+// When AllowedOrigins contains "*", it stays backward-compatible (allow all origins).
+// Otherwise, it checks the Origin header against the allowed list and echoes it back.
+func (s *Server) corsMiddleware(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        origin := r.Header.Get("Origin")
+
+        if origin != "" {
+            allowed := false
+            for _, o := range s.allowedOrigins {
+                if o == "*" || o == origin {
+                    allowed = true
+                    break
+                }
+            }
+            if allowed {
+                if len(s.allowedOrigins) == 1 && s.allowedOrigins[0] == "*" {
+                    w.Header().Set("Access-Control-Allow-Origin", "*")
+                } else {
+                    w.Header().Set("Access-Control-Allow-Origin", origin)
+                }
+            }
+            // Always set these CORS headers regardless of origin match
+            w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+            w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+            w.Header().Set("Access-Control-Allow-Credentials", "true")
+
+            // Handle preflight
+            if r.Method == http.MethodOptions {
+                w.WriteHeader(http.StatusNoContent)
+                return
+            }
+        }
+
+        next.ServeHTTP(w, r)
+    })
+}
+
 // handleIndex serves the embedded index.html.
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	data, err := staticFS.ReadFile("static/index.html")
@@ -298,12 +364,32 @@ func (s *Server) handleStaticFile(path, contentType string) http.HandlerFunc {
 	}
 }
 
-// handleHealth returns a minimal health check with server uptime.
+// handleHealth returns a health check with optional subsystem status.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	resp := map[string]interface{}{
 		"status": "ok",
 		"uptime": time.Since(s.startTime).String(),
-	})
+	}
+
+	if s.cfg.CameraStatus != nil {
+		alive := s.cfg.CameraStatus()
+		resp["camera"] = alive
+		if !alive {
+			resp["status"] = "degraded"
+		}
+	}
+	if s.cfg.RTSPStatus != nil {
+		alive := s.cfg.RTSPStatus()
+		resp["rtsp"] = alive
+		if !alive {
+			resp["status"] = "degraded"
+		}
+	}
+	if s.cfg.FrameRate != nil {
+		resp["frame_rate"] = s.cfg.FrameRate()
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleVersion returns the build version.
@@ -339,6 +425,3 @@ func coerceFloat64(v interface{}) interface{} {
 	}
 	return f
 }
-
-// _ = fmt.Sprint to avoid import in some Go versions
-var _ = strings.TrimSpace
