@@ -2,7 +2,7 @@ package h264
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -10,9 +10,9 @@ import (
 
 // AccessUnit represents a complete H.264 access unit (one or more NALUs).
 type AccessUnit struct {
-	NALUs    []NALU
+	NALUs     []NALU
 	Timestamp time.Time
-	KeyFrame bool // True if contains IDR
+	KeyFrame  bool // True if contains IDR
 }
 
 // Subscriber receives access units from the hub.
@@ -25,16 +25,22 @@ type Subscriber struct {
 // AUHub fans out access units to multiple subscribers.
 // Thread-safe via embedded mutex.
 type AUHub struct {
-	mu          sync.Mutex
-	subscribers map[string]*Subscriber
-	nextID      int
-	droppedAUs  atomic.Uint64 // total dropped AUs across all subscribers
+	mu                    sync.Mutex
+	subscribers           map[string]*Subscriber
+	nextID                int
+	droppedAUs            atomic.Uint64 // total dropped AUs across all subscribers
+	subscriberBufferSize  int
 }
 
-// NewAUHub creates a new access-unit fan-out hub.
 func NewAUHub() *AUHub {
+	return NewAUHubWithSize(64)
+}
+
+// NewAUHubWithSize creates a new access-unit fan-out hub with the given subscriber buffer size.
+func NewAUHubWithSize(size int) *AUHub {
 	return &AUHub{
-		subscribers: make(map[string]*Subscriber),
+		subscribers:          make(map[string]*Subscriber),
+		subscriberBufferSize: size,
 	}
 }
 
@@ -52,7 +58,7 @@ func (h *AUHub) StartDropLogger(ctx context.Context) {
 			case <-ticker.C:
 				cur := h.droppedAUs.Load()
 				if cur > last {
-					log.Printf("h264: %d AUs dropped in last 30s (slow subscribers)", cur-last)
+					slog.Warn("h264: AUs dropped in last 30s (slow subscribers)", "dropped", cur-last)
 					last = cur
 				}
 			}
@@ -91,7 +97,7 @@ func (h *AUHub) Subscribe(ctx context.Context) *Subscriber {
 
 	sub := &Subscriber{
 		ID:      id,
-		Channel: make(chan AccessUnit, 64),
+		Channel: make(chan AccessUnit, h.subscriberBufferSize),
 		cancel:  cancel,
 	}
 	h.subscribers[id] = sub
