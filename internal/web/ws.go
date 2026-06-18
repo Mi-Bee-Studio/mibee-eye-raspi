@@ -218,28 +218,4 @@ func (s *Server) sendInitialState(client *wsClient) {
 			}
 		}
 	}
-
-	// Send PTZ position.
-	if s.cfg.PTZ != nil {
-		pos := s.cfg.PTZ.GetPosition()
-		msg, _ := json.Marshal(map[string]interface{}{
-			"type":     "ptz-position",
-			"position": pos,
-		})
-		client.writeMT(websocket.TextMessage, msg)
-	}
-
-	// Send preset list.
-	if s.cfg.PTZ != nil {
-		presets := s.cfg.PTZ.ListPresets()
-		for _, p := range presets {
-			msg, _ := json.Marshal(map[string]interface{}{
-				"type":     "ptz-preset-added",
-				"token":    p.Token,
-				"name":     p.Name,
-				"position": p.Position,
-			})
-			client.writeMT(websocket.TextMessage, msg)
-		}
-	}
 }

@@ -14,7 +14,6 @@ import (
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/camera"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/config"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/h264"
-	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/ptz"
 )
 
 // Config holds the web server configuration.
@@ -26,7 +25,6 @@ type Config struct {
 	ConfigPath     string                // path to config.yaml (used by /api/config/onvif)
 	OnvifConfig    config.ConfigProvider  // read-only onvif/rtsp config
 	Params         *camera.ParamManager
-	PTZ            *ptz.State
 	AUHub          *h264.AUHub
 	Version        string                // build version from ldflags
 	Logger         *log.Logger            // nil -> log.Default()
@@ -104,25 +102,13 @@ func (s *Server) Start(ctx context.Context) error {
 	s.mux = http.NewServeMux()
 	s.hub = newWSHub(s.logger)
 
-	// Wire up hooks from ParamManager and PTZ to WebSocket hub.
+	// Wire up hooks from ParamManager to WebSocket hub.
 	if s.cfg.Params != nil {
 		s.cfg.Params.SetOnChange(func(name string, value interface{}) {
 			s.hub.sendEvent(wsEvent{
 				Type:  "param-changed",
 				Name:  name,
 				Value: value,
-			})
-		})
-	}
-	if s.cfg.PTZ != nil {
-		s.cfg.PTZ.SetOnPositionChange(func(pos ptz.Position) {
-			s.hub.sendEvent(wsEvent{
-				Type: "ptz-position",
-			})
-		})
-		s.cfg.PTZ.SetOnPresetListChange(func() {
-			s.hub.sendEvent(wsEvent{
-				Type: "preset-list-changed",
 			})
 		})
 	}
@@ -205,16 +191,6 @@ func (s *Server) registerRoutes() {
 	m.HandleFunc("GET /api/camera/params", s.authRequired(s.handleGetCameraParams))
 	m.HandleFunc("POST /api/camera/param", s.authRequired(s.handlePostCameraParam))
 	m.HandleFunc("GET /api/camera/options", s.authRequired(s.handleGetCameraOptions))
-	m.HandleFunc("GET /api/ptz/status", s.authRequired(s.handleGetPTZStatus))
-	m.HandleFunc("POST /api/ptz/move", s.authRequired(s.handlePostPTZMove))
-	m.HandleFunc("POST /api/ptz/absolute", s.authRequired(s.handlePostPTZAbsolute))
-	m.HandleFunc("POST /api/ptz/relative", s.authRequired(s.handlePostPTZRelative))
-	m.HandleFunc("POST /api/ptz/stop", s.authRequired(s.handlePostPTZStop))
-	m.HandleFunc("GET /api/ptz/presets", s.authRequired(s.handleGetPTZPresets))
-	m.HandleFunc("POST /api/ptz/preset", s.authRequired(s.handlePostPTZPreset))
-	m.HandleFunc("POST /api/ptz/preset/goto", s.authRequired(s.handlePostPTZPresetGoto))
-	m.HandleFunc("DELETE /api/ptz/preset/{token}", s.authRequired(s.handleDeletePTZPreset))
-	m.HandleFunc("PUT /api/ptz/preset/{token}", s.authRequired(s.handlePutPTZPreset))
 
 	// WebSocket — auth via Authorization header
 	m.HandleFunc("GET /ws", s.authRequired(s.handleWS))
@@ -399,11 +375,6 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// extractPresetToken extracts the token from the URL path /api/ptz/preset/{token}.
-func extractPresetToken(r *http.Request) string {
-	// Go 1.22+ ServeMux with {token} pattern puts it in r.PathValue
-	return r.PathValue("token")
-}
 
 // maskPassword returns "***" if the password is non-empty, "" otherwise.
 func maskPassword(pw string) string {
