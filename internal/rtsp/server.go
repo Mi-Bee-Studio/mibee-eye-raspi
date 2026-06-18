@@ -29,8 +29,15 @@ type Config struct {
 	Password string
 	// Address is the local IP advertised in RTSP URLs (default: auto-detect).
 	Address string
+	// WriteQueueSize is the gortsplib write queue size (default: 2048).
+	WriteQueueSize int
+	// EnableUDP enables UDP transport (requires UDPRTPPort and UDPRTCPPort).
+	EnableUDP bool
+	// UDPRTPPort is the UDP port for RTP packets (default: 8000).
+	UDPRTPPort int
+	// UDPRTCPPort is the UDP port for RTCP packets (default: 8001).
+	UDPRTCPPort int
 }
-
 // Server wraps gortsplib for H.264 streaming.
 // It reads H.264 access units from a frame source channel and
 // distributes them as RTP packets to connected RTSP clients.
@@ -55,6 +62,9 @@ func New(cfg Config) *Server {
 	if cfg.Port == 0 {
 		cfg.Port = 8554
 	}
+	if cfg.WriteQueueSize == 0 {
+		cfg.WriteQueueSize = 2048
+	}
 
 	h264Fmt := &format.H264{
 		PayloadTyp:        96,
@@ -78,18 +88,35 @@ func (s *Server) Start(ctx context.Context) error {
 	s.rtspServer = &gortsplib.Server{
 		Handler:        s,
 		RTSPAddress:    addr,
-		WriteQueueSize: 2048, // 256 default too small for WiFi clients; 2048 ≈ 27s buffer at 75 pkt/s
+		WriteQueueSize: s.cfg.WriteQueueSize, // 256 default too small for WiFi clients; 2048 ≈ 27s buffer at 75 pkt/s
 	}
 
-	// Start in background
+	// Enable UDP transport if configured (needed for NVR clients that prefer UDP)
+	if s.cfg.EnableUDP {
+		rtpPort := s.cfg.UDPRTPPort
+		if rtpPort == 0 {
+			rtpPort = 8000
+		}
+		rtcpPort := s.cfg.UDPRTCPPort
+		if rtcpPort == 0 {
+			rtcpPort = 8001
+		}
+		s.rtspServer.UDPRTPAddress = fmt.Sprintf(":%d", rtpPort)
+		s.rtspServer.UDPRTCPAddress = fmt.Sprintf(":%d", rtcpPort)
+	}
+
+	// Start the server synchronously — this binds the port and returns immediately
+	if err := s.rtspServer.Start(); err != nil {
+		return fmt.Errorf("start rtsp server: %w", err)
+	}
+
+	// Wait for server to be ready (Start returns quickly, Wait blocks)
 	go func() {
-		err := s.rtspServer.StartAndWait()
-		if err != nil {
-			log.Printf("rtsp server error: %v", err)
+		if err := s.rtspServer.Wait(); err != nil {
+			log.Printf("rtsp server exited: %v", err)
 		}
 	}()
-
-	// Wait for server to be ready
+	// Wait for server to be ready (check TCP connection)
 	deadline := time.After(5 * time.Second)
 	for {
 		select {
@@ -109,7 +136,6 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}
 }
-
 // Stop gracefully stops the RTSP server and closes all client connections.
 func (s *Server) Stop() error {
 	s.mu.Lock()
@@ -143,6 +169,13 @@ func (s *Server) SetFrameSource(ch <-chan h264.AccessUnit) {
 // Port returns the configured RTSP port.
 func (s *Server) Port() int {
 	return s.cfg.Port
+}
+
+// ClientCount returns the current number of connected RTSP clients.
+func (s *Server) ClientCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.clientCount
 }
 
 // --- gortsplib.ServerHandler interface ---
