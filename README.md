@@ -10,23 +10,23 @@
   <table>
     <tr>
       <td align="center"><b>🪶 15–25 MB</b><br><sub>Memory footprint on RPi 3B</sub></td>
-      <td align="center"><b>✅ ONVIF Profile S</b><br><sub>Device · Media · PTZ · Imaging</sub></td>
+      <td align="center"><b>✅ ONVIF Profile S</b><br><sub>Device · Media · Imaging</sub></td>
       <td align="center"><b>🔧 Zero CGO</b><br><sub>Pure Go, painless cross-compile</sub></td>
     </tr>
   </table>
 </div>
 
 
-MiBee Eye is a lightweight Go ONVIF camera service for single-board computers (Raspberry Pi, Banana Pi, Orange Pi) with support for all CSI/USB cameras. It provides ONVIF Device/Media/PTZ/Imaging services, RTSP streaming, RTMP push, and WS-Discovery for NVR/VMS integration.
+MiBee Eye is a lightweight Go ONVIF camera service for single-board computers (Raspberry Pi, Banana Pi, Orange Pi) with support for all CSI/USB cameras. It provides ONVIF Device/Media/Imaging services, RTSP streaming, RTMP push, and WS-Discovery for NVR/VMS integration.
 
 ## Features
 
-- **ONVIF Device/Media/PTZ/Imaging Services** - Full ONVIF compliance for NVR integration
+- **ONVIF Device/Media/Imaging Services** - Full ONVIF compliance for NVR integration
 - **RTSP Streaming** - H.264 video streaming at configurable resolutions and bitrates
 - **RTMP Push** - Stream to cloud services like Aliyun, Twitch, YouTube
 - **WS-Discovery** - Automatic camera discovery on the network
-- **Web Admin UI** - Dark-themed admin panel with live preview, camera controls, and PTZ
-- **Digital PTZ** - Pan/tilt/zoom via software cropping
+- **Web Admin UI** - Dark-themed admin panel with live preview and camera controls
+
 - **Camera Controls** - Brightness, contrast, saturation, sharpness adjustment
 - **HLS Live Streaming** - Pure Go MPEG-TS segmenter for browser playback (no ffmpeg)
 - **i18n Support** - English/Chinese web UI
@@ -90,9 +90,9 @@ The built-in web admin panel provides real-time camera management with modern st
 
 - **Live Preview** - HLS video player (hls.js library) for smooth browser playback
 - **Imaging Controls** - Sliders for brightness, contrast, saturation, sharpness; dropdowns for white balance and exposure mode
-- **PTZ Controls** - Directional pad for continuous movement, zoom buttons, preset management
+
 - **Server Config** - View all configuration sections, edit ONVIF credentials with save-and-restart
-- **WebSocket** - Real-time parameter and PTZ position updates without polling
+- **WebSocket** - Real-time parameter updates without polling
 - **Language Toggle** - Switch between English and Chinese interfaces
 - **Theme Toggle** - Dark/light mode switching
 - **Snapshot Button** - One-click JPEG capture
@@ -144,12 +144,12 @@ flowchart TB
     ONVIF --> NVR
     RTMP --> CLOUD
 ```
-Camera capture via CSI interface supports OV5647, IMX219, IMX708, IMX477 modules. RTSP server uses `gortsplib` (same as MediaMTX). ONVIF provides device discovery, media control, PTZ operations and imaging parameter adjustment. RTMP push supports cloud services.
+Camera capture via CSI interface supports OV5647, IMX219, IMX708, IMX477 modules. RTSP server uses `gortsplib` (same as MediaMTX). ONVIF provides device discovery, media control and imaging parameter adjustment. RTMP push supports cloud services.
 
 | Metric | MiBee Eye | MediaMTX | Improvement |
 |--------|---------|----------|-------------|
 | Memory Usage | **15–25 MB** | ~45 MB | 45–67% reduction |
-| ONVIF Server | ✅ **Profile S** (Device/Media/PTZ/Imaging) | ❌ Not supported | — |
+| ONVIF Server | ✅ **Profile S** (Device/Media/Imaging) | ❌ Not supported | — |
 | CGO Dependencies | **Zero** | CGO required | Painless cross-compile |
 | Camera Control | ✅ Brightness, Contrast, WB, etc. | ❌ None | — |
 | RTMP Push | ✅ Built-in | ❌ Extra config needed | — |
@@ -158,7 +158,7 @@ Camera capture via CSI interface supports OV5647, IMX219, IMX708, IMX477 modules
 | Metric | MiBee Eye | MediaMTX | Improvement |
 |--------|---------|----------|-------------|
 | Memory Usage | **15–25 MB** | ~45 MB | 45–67% reduction |
-| ONVIF Server | ✅ **Profile S** (Device/Media/PTZ/Imaging) | ❌ Not supported | — |
+| ONVIF Server | ✅ **Profile S** (Device/Media/Imaging) | ❌ Not supported | — |
 | CGO Dependencies | **Zero** | CGO required | Painless cross-compile |
 | Camera Control | ✅ Brightness, Contrast, WB, etc. | ❌ None | — |
 | RTMP Push | ✅ Built-in | ❌ Extra config needed | — |
@@ -166,7 +166,7 @@ Camera capture via CSI interface supports OV5647, IMX219, IMX708, IMX477 modules
 
 | Component | Library | Rationale |
 |-----------|---------|-----------|
-| ONVIF Server | Hand-written SOAP | Pure Go, full Device/Media/PTZ/Imaging |
+| ONVIF Server | Hand-written SOAP | Pure Go, full Device/Media/Imaging |
 | RTSP Server | `bluenviron/gortsplib/v5` | Same as MediaMTX, proven compatibility |
 | RTMP Push | Pure Go implementation | Active maintenance, low footprint |
 | Camera Capture | MediaMTX rpicam (subprocess) | Battle-tested libcamera, no CGO |
@@ -177,7 +177,7 @@ Camera capture via CSI interface supports OV5647, IMX219, IMX708, IMX477 modules
 
 | Component | Library | Rationale |
 |-----------|---------|-----------|
-| ONVIF Server | Hand-written SOAP | Pure Go, full Device/Media/PTZ/Imaging |
+| ONVIF Server | Hand-written SOAP | Pure Go, full Device/Media/Imaging |
 | RTSP Server | `bluenviron/gortsplib/v5` | Same as MediaMTX, proven compatibility |
 | RTMP Push | Pure Go implementation | Active maintenance, low footprint |
 | Camera Capture | MediaMTX rpicam (subprocess) | Battle-tested libcamera, no CGO |

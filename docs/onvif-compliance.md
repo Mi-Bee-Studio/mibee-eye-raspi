@@ -1,7 +1,7 @@
 [中文](zh/onvif-compliance.md)\n
 # ONVIF Compliance Reference
 
-This document provides detailed compliance information for the MiBee Eye ONVIF camera service. The implementation provides ONVIF Device/Media/PTZ/Imaging services, WS-Discovery support, and WS-Security authentication for NVR integration.
+This document provides detailed compliance information for the MiBee Eye ONVIF camera service. The implementation provides ONVIF Device/Media/Imaging services, WS-Discovery support, and WS-Security authentication for NVR integration.
 
 ## ONVIF Profile S Compliance
 
@@ -9,7 +9,7 @@ This document provides detailed compliance information for the MiBee Eye ONVIF c
 |-----------|--------|-------|
 | **ONVIF Device Service** | ✅ Full | WS-Discovery, GetDeviceInformation, GetCapabilities |
 | **ONVIF Media Service** | ✅ Full | GetProfiles, GetStreamUri, VideoSource support |
-| **ONVIF PTZ Service** | ✅ Virtual | Digital PTZ via software cropping only |
+| **ONVIF PTZ Service** | ❌ Not implemented | PTZ removed as dead code (no camera wiring) |
 | **ONVIF Imaging Service** | ✅ Full | Brightness, contrast, saturation, sharpness, exposure, white balance |
 | **WS-Discovery** | ✅ Full | UDP multicast + HTTP POST probe support |
 | **WS-Security** | ✅ Full | UsernameToken Text and Digest authentication |
@@ -22,7 +22,7 @@ This document provides detailed compliance information for the MiBee Eye ONVIF c
 |-----------|-------------|-------|
 | `GetSystemDateAndTime` | ✅ | Returns UTC time, manual mode (no NTP sync) |
 | `GetDeviceInformation` | ✅ | Manufacturer, model, firmware, serial, hardware ID from config |
-| `GetCapabilities` | ✅ | Media, PTZ, Device, Imaging services advertised |
+| `GetCapabilities` | ✅ | Media, Device, Imaging services advertised |
 | `GetServices` | ✅ | Lists all ONVIF services with XAddr endpoints |
 | `GetScopes` | ✅ | Name, hardware, and type scopes |
 
@@ -39,7 +39,7 @@ HardwareId: "OV5647"
 ```yaml
 Device: XAddr: "http://<camera-ip>:8080/onvif/device_service"
 Media: XAddr: "http://<camera-ip>:8080/onvif/media_service"  
-PTZ: XAddr: "http://<camera-ip>:8080/onvif/ptz_service"
+
 Imaging: XAddr: "http://<camera-ip>:8080/onvif/device_service"
 ```
 
@@ -102,37 +102,37 @@ Settings:
   WhiteBalance: { Mode: "AUTO" }
 ```
 
-### PTZ Service
+PTZ service was removed as dead code (state machine tracked position but never applied to camera - no ScalerCrop wiring). The OV5647 hardware has no PTZ motors.
 
-| Operation | Implemented | Notes |
-|-----------|-------------|-------|
-| `ContinuousMove` | ✅ | Virtual pan/tilt/zoom with momentum |
-| `AbsoluteMove` | ✅ | Move to specific coordinates |
-| `RelativeMove` | ✅ | Move by relative offsets |
-| `Stop` | ✅ | Stop all PTZ movement |
-| `GetStatus` | ✅ | Current position and movement status |
-| `GetPresets` | ✅ | List stored presets |
-| `SetPreset` | ✅ | Store current position as preset |
-| `GotoPreset` | ✅ | Move to stored preset |
-| `RemovePreset` | ✅ | Delete stored preset |
-| `GetNodes` | ✅ | PTZ node configuration |
-| `GetConfigurations` | ✅ | PTZ configuration options |
 
-**PTZ Coordinate Spaces:**
-- **Absolute**: Pan (-1.0 to 1.0), Tilt (-1.0 to 1.0), Zoom (0.0 to 1.0)
-- **Relative**: Pan (-1.0 to 1.0), Tilt (-1.0 to 1.0), Zoom (-1.0 to 1.0)
-- **Continuous**: Pan (-1.0 to 1.0), Tilt (-1.0 to 1.0), Zoom (0.0 to 1.0)
+## WS-Discovery Support
 
-**Status Response:**
-```yaml
-PTZStatus:
-  PanTilt:
-    Position: 0.0
-    MoveStatus: "IDLE"
-  Zoom:
-    Position: 1.0
-    MoveStatus: "IDLE"
-```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 ## WS-Discovery Support
 
@@ -185,7 +185,7 @@ UsernameToken authentication is implemented with both password types:
 
 ### Functional Limitations
 - **Single Profile**: Only one media profile supported (main profile)
-- **Virtual PTZ**: Software-based pan/tilt/zoom only, no physical movement
+- **No Audio**: Audio streaming not implemented
 - **No Audio**: Audio streaming not implemented
 - **No Events**: Event service not supported
 - **No Analytics**: Video analytics not available
@@ -195,7 +195,7 @@ UsernameToken authentication is implemented with both password types:
 - **OV5647 Camera**: Fixed focus, no autofocus capability
 - **No IR Cut Filter**: Fixed IR filter (NoIR variant not supported)
 - **No WDR**: Wide dynamic range not available on OV5647
-- **No Physical PTZ**: No motors for mechanical positioning
+
 
 ### Protocol Limitations
 - **Manual System Time**: No NTP sync, UTC time fixed at startup
@@ -225,7 +225,7 @@ UsernameToken authentication is implemented with both password types:
 |---------|----------|----------|-------------|
 | Device Service | `/onvif/device_service` | HTTP/SOAP | Device management |
 | Media Service | `/onvif/media_service` | HTTP/SOAP | Media profile/URI |
-| PTZ Service | `/onvif/ptz_service` | HTTP/SOAP | PTZ control |
+| Snapshot | `/snapshot` | HTTP | JPEG snapshots |
 | Snapshot | `/snapshot` | HTTP | JPEG snapshots |
 | RTSP Stream | `/stream` | RTSP | H.264 video stream |
 

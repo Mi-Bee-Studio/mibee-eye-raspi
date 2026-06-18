@@ -101,7 +101,7 @@ onvif:
 
 ### Web UI Configuration
 
-Web UI settings for the built-in browser-based admin panel with live preview, PTZ controls, and camera configuration.
+Web UI settings for the built-in browser-based admin panel with live preview and camera configuration.
 
 ```yaml
 web:

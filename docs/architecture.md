@@ -4,7 +4,7 @@
 
 Measured on single-board computers at 720p@15fps:
 
-MiBee Eye is a lightweight Go application providing ONVIF-compliant camera services for single-board computers (Raspberry Pi, Banana Pi, Orange Pi). It replaces MediaMTX with a custom implementation to add missing ONVIF server capabilities while maintaining low resource usage (~20MB RAM, measured on device: MiBee Eye 9MB + mtxrpicam 10MB). The system supports ONVIF Device/Media/PTZ/Imaging services, RTSP streaming, RTMP push, and WS-Discovery for NVR integration.
+MiBee Eye is a lightweight Go application providing ONVIF-compliant camera services for single-board computers (Raspberry Pi, Banana Pi, Orange Pi). It replaces MediaMTX with a custom implementation to add missing ONVIF server capabilities while maintaining low resource usage (~20MB RAM, measured on device: MiBee Eye 9MB + mtxrpicam 10MB). The system supports ONVIF Device/Media/Imaging services, RTSP streaming, RTMP push, and WS-Discovery for NVR integration.
 
 ## Component Architecture
 
@@ -18,12 +18,12 @@ MiBee Eye is a lightweight Go application providing ONVIF-compliant camera servi
 │                 ONVIF Server                                │
 │              (internal/onvif/server.go)                     │
 │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐│
-│  │ Device Service  │  │ Media Service  │  │ PTZ Service    ││
+│  │ Device Service  │  │ Media Service  │  │ Imaging Service│
 │  │                 │  │                 │  │                ││
-│  │ - Device Info   │  │ - Get Profiles  │  │ - Continuous   ││
-│  │ - Capabilities  │  │ - Get StreamUri│  │   Movement     ││
-│  │ - WS-Discovery  │  │ - Get Snapshot │  │ - Absolute Move││
-│  │                 │  │                 │  │ - Presets      ││
+│  │ - Device Info   │  │ - Get Profiles  │  │ - Brightness    │
+│  │ - Capabilities  │  │ - Get StreamUri│  │ - Contrast      │
+│  │ - WS-Discovery  │  │ - Get Snapshot │  │ - Saturation    │
+│  │                 │  │                 │  │ - Sharpness     │
 │  └─────────────────┘  └─────────────────┘  └─────────────────┘│
 │  ┌─────────────────┐  ┌─────────────────┐                     │
 │  │ Imaging Service │  │ WS-Discovery   │                     │
@@ -76,7 +76,7 @@ The ONVIF server implements a single-endpoint SOAP framework handling multiple O
 Services implemented:
 - **Device**: Device information, capabilities, WS-Discovery
 - **Media**: Profiles, stream URI, snapshot access
-- **PTZ**: Virtual pan/tilt/zoom control with presets
+
 - **Imaging**: Camera parameter control (brightness, contrast, etc.)
 
 ### Camera Subsystem (`internal/camera/camera.go`)
@@ -151,25 +151,11 @@ Web UI Server provides browser-based camera management interface:
 - **Themes**: Dark/light theme preferences
 - **Video Player**: HLS playback using hls.js library
 - **Camera Controls**: Real-time brightness, contrast, saturation, sharpness adjustment
-- **PTZ Interface**: Directional pad for continuous movement, zoom controls, preset management
+
 - **Snapshot**: JPEG capture with download capability
 - **Monitoring**: Real-time parameter updates via WebSocket
 - **Server Config**: Configuration viewer and editor with ONVIF credentials management
 
-
-Virtual PTZ implementation with software-based positioning:
-
-Virtual PTZ implementation with software-based positioning:
-
-- **Position System**: Pan [-1,1], Tilt [-1,1], Zoom [0,1] coordinate ranges
-- **Movement Modes**:
-  - Continuous: Velocity-based movement with 50ms updates
-  - Absolute: Exponential easing to target position
-  - Relative: Immediate delta positioning
-- **Preset Management**: Named position storage and recall
-- **State Management**: Thread-safe position tracking and status reporting
-
-PTZ operations map to camera cropping parameters for digital zoom without hardware changes.
 
 ## Data Flow Pipeline
 
