@@ -559,11 +559,16 @@
                 .then(function () {
                     submitBtn.classList.remove('is-loading');
                     submitBtn.disabled = false;
-                    setAuth(true);
-                    /* Initialize the app after login */
-                    bootApp();
-                })
-                .catch(function (err) {
+			setAuth(true);
+			/* Initialize the app after login */
+			bootApp();
+			/* Restart MSE player if camera tab is active (re-login after session expiry) */
+			if (state.currentTab === 'camera') {
+				destroyMsePlayer();
+				startMsePlayer();
+			}
+		})
+		.catch(function (err) {
                     submitBtn.classList.remove('is-loading');
                     submitBtn.disabled = false;
                     showError(err.message || t('login.networkError'));
@@ -594,7 +599,17 @@
             opts.headers['Content-Type'] = 'application/json';
             opts.body = JSON.stringify(body);
         }
-        return fetch(url, opts).then(function (r) {
+	return fetch(url, opts).then(function (r) {
+		if (r.status === 401) {
+			/* Token expired or invalid — return to login without destroying MSE player.
+			   The player will be restarted when the user re-logs in. */
+			closeWS();
+			clearToken();
+			setAuth(false);
+			var err = new Error(t('login.sessionExpired'));
+			err.status = 401;
+			throw err;
+		}
             if (r.status === 401) {
                 /* Token expired or invalid — return to login */
                 destroyMsePlayer();
