@@ -319,42 +319,34 @@ curl -s http://localhost:8080/onvif/device_service | grep -i device
 ### 症状
 - 快照端点返回错误
 - NVR 无法捕获图像
-- 日志中显示 FFmpeg 错误
 
 ### 诊断
 ```bash
 # 检查快照端点
 curl -I http://localhost:8080/snapshot
 
-# 手动测试 FFmpeg
-ffmpeg -rtsp_transport tcp -i rtsp://localhost:8554/stream \
-  -vf "scale=640:480" -frames:v 1 snapshot.jpg
-
-# 检查 FFmpeg 安装
-ffmpeg -version
-```
-
 # 测试快照端点并检查响应
 curl -s -w "\nHTTP 状态: %{http_code}\n" http://localhost:8080/snapshot -o /dev/null
 # HTTP 200 + "image/jpeg" = 正常工作
 # HTTP 503 = 摄像头未提供帧（检查编码器）
+```
 
 ### 解决方案
-1. **缺少 FFmpeg**：安装 FFmpeg
-   ```bash
-   sudo apt install ffmpeg
-   ```
-
-2. **相机未运行**：确保 MiBee Eye 处于活动状态
+1. **相机未运行**：确保 MiBee Eye 处于活动状态
    ```bash
    sudo systemctl restart mibee-eye
    ```
 
-3. **分辨率问题**：调整快照参数
+2. **分辨率问题**：调整相机分辨率
    ```yaml
    camera:
      width: 1280
      height: 720
+   ```
+
+3. **编码器未产生帧**：检查日志并验证 mtxrpicam 正常工作
+   ```bash
+   journalctl -u mibee-eye --since "5 minutes ago" | grep -i "encoder\|h264"
    ```
 
 ## HLS 实时预览问题
@@ -363,41 +355,103 @@ curl -s -w "\nHTTP 状态: %{http_code}\n" http://localhost:8080/snapshot -o /de
 - Web UI 显示黑色视频播放器
 - Web UI 中显示 "HLS not available" 消息
 - 浏览器控制台显示 hls.js 错误
-- /tmp/hls-mibee-eye/ 中没有 .m3u8 或 .ts 文件
 
 ### 诊断
 ```bash
-# 检查 HLS 输出目录
-ls -la /tmp/hls-mibee-eye/
-# 期望：stream.m3u8 + seg-*.ts 文件
-
-# 检查 ffmpeg 进程
-ps aux | grep ffmpeg
-
 # 检查 HLS HTTP 端点
 curl -s http://localhost:8088/hls/stream.m3u8
 
+# 验证配置中启用了 HLS
+grep -A2 'hls:' config.yaml
+
 # 检查 MiBee Eye 日志中的 HLS 错误
 journalctl -u mibee-eye --grep "HLS"
+
+# 检查 RTSP 流是否在为 HLS 提供数据（必须运行）
+journalctl -u mibee-eye --grep "AUHub"
 ```
 
 ### 解决方案
-1. **未安装 ffmpeg**：安装 ffmpeg：
-   ```bash
-   sudo apt install ffmpeg
+1. **HLS 未启用**：在 config.yaml 中启用 HLS
+   ```yaml
+   hls:
+     enabled: true
+     segment_duration: 2s
    ```
-2. **RTSP 源不可用**：首先确保 RTSP 流正常工作：
+
+   2. **RTSP 源不可用**：首先确保 RTSP 流正常工作：
    ```bash
    ffprobe rtsp://localhost:8554/stream
    ```
-3. **HLS 服务器未启动**：检查 MiBee Eye 日志中的 "warning: HLS bridge not started"
-4. **重启 MiBee Eye**：sudo systemctl restart mibee-eye
-5. **检查磁盘空间**：/tmp 必须有可用空间用于 HLS 段：
-   ```bash
-   df -h /tmp
+
+3. **浏览器兼容性**：HLS 使用纯 Go MPEG-TS 分段器通过 HTTP 提供。确保浏览器支持 MSE 或使用 hls.js 库。
+
+   4. **重启 MiBee Eye**：sudo systemctl restart mibee-eye
+
+5. **调试日志**：设置 `logging.level: debug` 以查看分段器错误
+
+
+## 端口 9100 冲突
+
+### 症状
+
+- 指标端点无法启动
+- 日志中出现 "Address already in use" 错误
+- 服务启动但指标不可访问
+
+### 诊断
+
+```bash
+# 检查端口 9100 是否被使用
+netstat -tlnp | grep 9100
+
+# 检查 prometheus-node-exporter
+ps aux | grep node_exporter
+```
+
+### 根因
+
+Prometheus node_exporter 默认使用端口 9100，与 mibee-eye 指标端点冲突。
+
+### 解决方案
+
+1. **禁用指标**：在 config.yaml 中设置 `metrics.enabled: false`
+
+2. **更改指标端口**：使用不同的端口：
+   ```yaml
+   metrics:
+     enabled: true
+     port: 9101  # 或任何可用端口
    ```
 
-## 性能问题
+
+## WiFi 稳定性问题
+
+### 症状
+
+- RTSP/HLS 流间歇性中断
+- 客户端随机断开
+- 负载下网络吞吐量下降
+
+### 根因
+
+RPi 3B WiFi 由于硬件限制（理论 270Mbps），在持续传输负载下会掉线。
+
+### 解决方案
+
+1. **尽可能使用以太网**：有线连接更稳定
+
+2. **降低比特率/帧率**：针对 WiFi 降低相机设置：
+   ```yaml
+   camera:
+     fps: 10
+     bitrate: 1000000  # 1 Mbps
+   ```
+
+3. **重启服务以恢复**：如果 WiFi 掉线：
+   ```bash
+   sudo systemctl restart mibee-eye
+   ```
 
 ### 症状
 - 高内存使用
@@ -429,12 +483,7 @@ ip -s link show wlan0
      bitrate: 1000000  # 1 Mbps
    ```
 
-2. **限制并发流**：添加连接限制
-   ```yaml
-   rtsp:
-     max_clients: 5  # 限制并发观看者
-   ```
-
+2. **降低 RTSP 缓冲区大小**（高级）：在 config.yaml 中降低 subscriber_buffer_size
 3. **监控资源**：添加监控
    ```bash
    # 每 5 秒监控内存
@@ -444,7 +493,7 @@ ip -s link show wlan0
 ## 内存不足 (OOM) 问题
 
 ### 症状
-- mibee-eye 或 ffmpeg 进程被意外终止
+- mibee-eye 进程被意外终止
 - journalctl 日志中显示 "Killed"
 - dmesg 显示 "Out of memory" 或 "oom-killer"
 - 系统变得无响应
@@ -462,7 +511,7 @@ ps aux --sort=-%mem | head -10
 ```
 
 ### 根因
-树莓 Pi 3B 只有 905MB RAM。如果另一个进程消耗过多内存（例如 prometheus-node-exporter-collectors 的 apt_info.py 使用 124MB），OOM 杀手会终止最大的进程，这可能是 ffmpeg (HLS) 或 mtxrpicam。
+树莓 Pi 3B 只有 905MB RAM。如果另一个进程消耗过多内存（例如 prometheus-node-exporter-collectors 的 apt_info.py 使用 124MB），OOM 杀手会终止最大的进程。
 
 ### 解决方案
 1. **检查 cron/周期性任务**：禁用不必要的定时器：
@@ -553,7 +602,7 @@ error while loading shared libraries: libcamera.so.9.9: cannot open shared objec
 ```
 WARNING: HLS bridge not started
 ```
-- 解决方案：检查 ffmpeg 安装，RTSP 源可用性
+- 解决方案：确保 `hls.enabled: true` 且 RTSP 服务器正在运行以向 AUHub 订阅者提供数据
 
 ## 系统状态命令
 
@@ -572,7 +621,7 @@ netstat -tlnp | grep -E '8554|8080|3702'
 echo "Web UI:"
 curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8088/
 echo "HLS 状态:"
-ls /tmp/hls-mibee-eye/stream.m3u8 2>/dev/null && echo "HLS 活动" || echo "HLS 未活动"
+curl -s http://localhost:8088/hls/stream.m3u8 > /dev/null 2>&1 && echo "HLS 活动" || echo "HLS 未活动"
 
 echo "内存："
 free -h

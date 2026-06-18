@@ -319,42 +319,34 @@ curl -s http://localhost:8080/onvif/device_service | grep -i device
 ### Symptoms
 - Snapshot endpoint returns error
 - NVR can't capture images
-- FFmpeg errors in logs
 
 ### Diagnosis
 ```bash
 # Check snapshot endpoint
 curl -I http://localhost:8080/snapshot
 
-# Test FFmpeg manually
-ffmpeg -rtsp_transport tcp -i rtsp://localhost:8554/stream \
-  -vf "scale=640:480" -frames:v 1 snapshot.jpg
-
-# Check FFmpeg installation
-ffmpeg -version
-```
-
 # Test snapshot endpoint and check response
 curl -s -w "\nHTTP Status: %{http_code}\n" http://localhost:8080/snapshot -o /dev/null
 # HTTP 200 + "image/jpeg" = working
 # HTTP 503 = camera not providing frames (check encoder)
+```
 
 ### Solutions
-1. **FFmpeg missing**: Install FFmpeg
-   ```bash
-   sudo apt install ffmpeg
-   ```
-
-2. **Camera not running**: Ensure mibee-eye is active
+1. **Camera not running**: Ensure mibee-eye is active
    ```bash
    sudo systemctl restart mibee-eye
    ```
 
-3. **Resolution issues**: Adjust snapshot parameters
+2. **Resolution issues**: Adjust camera resolution in config.yaml
    ```yaml
    camera:
      width: 1280
      height: 720
+   ```
+
+3. **Encoder not producing frames**: Check logs and verify mtxrpicam is working
+   ```bash
+   journalctl -u mibee-eye --since "5 minutes ago" | grep -i "encoder\|h264"
    ```
 ## HLS Live Preview Issues
 
@@ -362,41 +354,103 @@ curl -s -w "\nHTTP Status: %{http_code}\n" http://localhost:8080/snapshot -o /de
 - Web UI shows black video player
 - "HLS not available" message in web UI
 - Browser console shows hls.js errors
-- No .m3u8 or .ts files in /tmp/hls-mibee-eye/
 
 ### Diagnosis
 ```bash
-# Check HLS output directory
-ls -la /tmp/hls-mibee-eye/
-# Expected: stream.m3u8 + seg-*.ts files
-
-# Check ffmpeg process
-ps aux | grep ffmpeg
-
 # Check HLS HTTP endpoint
 curl -s http://localhost:8088/hls/stream.m3u8
 
+# Verify HLS is enabled in config
+grep -A2 'hls:' config.yaml
+
 # Check mibee-eye logs for HLS errors
 journalctl -u mibee-eye --grep "HLS"
+
+# Check RTSP stream is feeding HLS (must be running)
+journalctl -u mibee-eye --grep "AUHub"
 ```
 
 ### Solutions
-1. **ffmpeg not installed**: Install ffmpeg:
-   ```bash
-   sudo apt install ffmpeg
+1. **HLS not enabled**: Enable HLS in config.yaml
+   ```yaml
+   hls:
+     enabled: true
+     segment_duration: 2s
    ```
-2. **RTSP source unavailable**: Ensure RTSP stream is working first:
+
+   2. **RTSP source unavailable**: Ensure RTSP stream is working first:
    ```bash
    ffprobe rtsp://localhost:8554/stream
    ```
-3. **HLS server not started**: Check mibee-eye logs for "warning: HLS bridge not started"
-4. **Restart mibee-eye**: sudo systemctl restart mibee-eye
-5. **Check disk space**: /tmp must have free space for HLS segments:
-   ```bash
-   df -h /tmp
+
+3. **Browser compatibility**: HLS uses pure Go MPEG-TS segmenter served via HTTP. Ensure browser supports MSE or use hls.js library.
+
+   4. **Restart mibee-eye**: sudo systemctl restart mibee-eye
+
+5. **Debug logging**: Set `logging.level: debug` to see segmenter errors
+
+
+## Port 9100 Conflict
+
+### Symptoms
+
+- Metrics endpoint fails to start
+- "Address already in use" error in logs
+- Service starts but metrics not accessible
+
+### Diagnosis
+
+```bash
+# Check if port 9100 is in use
+netstat -tlnp | grep 9100
+
+# Check for prometheus-node-exporter
+ps aux | grep node_exporter
+```
+
+### Root Cause
+
+Port 9100 is used by Prometheus node_exporter by default, conflicting with mibee-eye metrics endpoint.
+
+### Solutions
+
+1. **Disable metrics**: Set `metrics.enabled: false` in config.yaml
+
+2. **Change metrics port**: Use a different port:
+   ```yaml
+   metrics:
+     enabled: true
+     port: 9101  # or any available port
    ```
 
-## Performance Issues
+
+## WiFi Stability Issues
+
+### Symptoms
+
+- RTSP/HLS streams drop intermittently
+- Client disconnects randomly
+- Network throughput drops under load
+
+### Root Cause
+
+RPi 3B WiFi drops under sustained transfer load due to hardware limitations (270Mbps theoretical).
+
+### Solutions
+
+1. **Use Ethernet if possible**: Wired connection is more stable
+
+2. **Lower bitrate/fps**: Reduce camera settings for WiFi:
+   ```yaml
+   camera:
+     fps: 10
+     bitrate: 1000000  # 1 Mbps
+   ```
+
+3. **Restart service to recover**: If WiFi drops:
+   ```bash
+   sudo systemctl restart mibee-eye
+   ```
 
 ### Symptoms
 - High memory usage
@@ -428,12 +482,7 @@ ip -s link show wlan0
      bitrate: 1000000  # 1 Mbps
    ```
 
-2. **Limit concurrent streams**: Add connection limits
-   ```yaml
-   rtsp:
-     max_clients: 5  # Limit concurrent viewers
-   ```
-
+2. **Reduce RTSP buffer sizes** (advanced): Lower subscriber_buffer_size in config.yaml
 3. **Monitor resources**: Add monitoring
    ```bash
    # Monitor memory every 5 seconds
@@ -443,7 +492,7 @@ ip -s link show wlan0
 ## Out of Memory (OOM) Issues
 
 ### Symptoms
-- mibee-eye or ffmpeg process killed unexpectedly
+- mibee-eye process killed unexpectedly
 - "Killed" in journalctl logs
 - dmesg shows "Out of memory" or "oom-killer"
 - System becomes unresponsive
@@ -461,8 +510,7 @@ ps aux --sort=-%mem | head -10
 ```
 
 ### Root Cause
-The single-board computer has limited RAM. If another process consumes excessive memory (e.g. prometheus-node-exporter-collectors' apt_info.py using 124MB), the OOM killer will terminate the largest process, which may be ffmpeg (HLS) or mtxrpicam.
-
+The single-board computer has limited RAM. If another process consumes excessive memory (e.g. prometheus-node-exporter-collectors' apt_info.py using 124MB), the OOM killer will terminate the largest process.
 ### Solutions
 1. **Check for cron/periodic jobs**: Disable unnecessary timers:
    ```bash
@@ -552,8 +600,7 @@ error while loading shared libraries: libcamera.so.9.9: cannot open shared objec
 ```
 WARNING: HLS bridge not started
 ```
-- Solution: Check ffmpeg installation, RTSP source availability
-
+- Solution: Ensure `hls.enabled: true` and RTSP server is running to feed AUHub subscribers
 ## System Status Commands
 
 ```bash
@@ -571,7 +618,7 @@ netstat -tlnp | grep -E '8554|8080|3702'
 echo "Web UI:"
 curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8088/
 echo "HLS Status:"
-ls /tmp/hls-mibee-eye/stream.m3u8 2>/dev/null && echo "HLS active" || echo "HLS inactive"
+curl -s http://localhost:8088/hls/stream.m3u8 > /dev/null 2>&1 && echo "HLS active" || echo "HLS inactive"
 
 echo "Memory:"
 free -h
