@@ -11,9 +11,13 @@ import (
 )
 
 func TestHealthEndpoint(t *testing.T) {
+	sessions, err := NewSessionStore("admin", "admin123")
+	if err != nil {
+		t.Fatalf("NewSessionStore: %v", err)
+	}
 	s := &Server{
 		logger:    log.New(io.Discard, "", 0),
-		sessions:  NewSessionStore("admin", "admin123"),
+		sessions:  sessions,
 		startTime: time.Now().Add(-2 * time.Hour), // 2 hours ago for a predictable uptime
 	}
 	s.mux = http.NewServeMux()
@@ -56,9 +60,13 @@ func TestHealthEndpoint(t *testing.T) {
 }
 
 func TestHealthEndpoint_ContentType(t *testing.T) {
+	sessions, err := NewSessionStore("admin", "admin123")
+	if err != nil {
+		t.Fatalf("NewSessionStore: %v", err)
+	}
 	s := &Server{
 		logger:    log.New(io.Discard, "", 0),
-		sessions:  NewSessionStore("admin", "admin123"),
+		sessions:  sessions,
 		startTime: time.Now(),
 	}
 	s.mux = http.NewServeMux()
