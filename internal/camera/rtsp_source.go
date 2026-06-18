@@ -9,8 +9,9 @@ package camera
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bluenviron/gortsplib/v5"
@@ -130,12 +131,18 @@ func (s *RTSPSource) run(ctx context.Context) {
 		default:
 		}
 
-		err := s.connect(ctx)
+		framesReceived, err := s.connect(ctx)
 		if ctx.Err() != nil {
 			return
 		}
+		// Reset backoff if we received at least one frame during the session.
+		// This prevents exponential backoff from accumulating across healthy
+		// but short-lived reconnections.
+		if framesReceived {
+			backoff = time.Second
+		}
 
-		log.Printf("camera: rtsp source disconnected: %v, reconnecting in %v", err, backoff)
+		slog.Warn("camera: rtsp source disconnected, reconnecting", "error", err, "backoff", backoff)
 
 		select {
 		case <-ctx.Done():
@@ -148,10 +155,10 @@ func (s *RTSPSource) run(ctx context.Context) {
 
 // connect establishes a single RTSP session, consumes packets, and blocks
 // until the connection is lost or context is cancelled.
-func (s *RTSPSource) connect(ctx context.Context) error {
+func (s *RTSPSource) connect(ctx context.Context) (bool, error) {
 	u, err := base.ParseURL(s.url)
 	if err != nil {
-		return fmt.Errorf("parse rtsp url: %w", err)
+		return false, fmt.Errorf("parse rtsp url: %w", err)
 	}
 
 	// Use TCP transport for reliability over WiFi
@@ -163,37 +170,38 @@ func (s *RTSPSource) connect(ctx context.Context) error {
 	}
 
 	if err := client.Start(); err != nil {
-		return fmt.Errorf("rtsp connect: %w", err)
+		return false, fmt.Errorf("rtsp connect: %w", err)
 	}
 	defer client.Close()
 
 	desc, _, err := client.Describe(u)
 	if err != nil {
-		return fmt.Errorf("rtsp describe: %w", err)
+		return false, fmt.Errorf("rtsp describe: %w", err)
 	}
 
 	// Find H.264 track
 	var forma *format.H264
 	medi := desc.FindFormat(&forma)
 	if medi == nil {
-		return fmt.Errorf("no h264 track found in rtsp stream")
+		return false, fmt.Errorf("no h264 track found in rtsp stream")
 	}
 
 	// Create RTP decoder
 	rtpDec, err := forma.CreateDecoder()
 	if err != nil {
-		return fmt.Errorf("create rtp decoder: %w", err)
+		return false, fmt.Errorf("create rtp decoder: %w", err)
 	}
 
 	// Setup the media track
 	if _, err := client.Setup(desc.BaseURL, medi, 0, 0); err != nil {
-		return fmt.Errorf("rtsp setup: %w", err)
+		return false, fmt.Errorf("rtsp setup: %w", err)
 	}
 
 	// Track timestamp baseline
 	var ptsOK bool
 	var ptsBase int64
 	firstRA := false
+	var framesReceived atomic.Bool
 
 	// Packet handler: depacketize RTP → H.264 NALUs → Frame
 	client.OnPacketRTP(medi, forma, func(pkt *rtp.Packet) {
@@ -210,7 +218,7 @@ func (s *RTSPSource) connect(ctx context.Context) error {
 		au, err := rtpDec.Decode(pkt)
 		if err != nil {
 			if err != rtph264.ErrNonStartingPacketAndNoPrevious && err != rtph264.ErrMorePacketsNeeded {
-				log.Printf("camera: rtsp rtp decode error: %v", err)
+				slog.Warn("camera: rtsp rtp decode error", "error", err)
 			}
 			return
 		}
@@ -220,6 +228,7 @@ func (s *RTSPSource) connect(ctx context.Context) error {
 			return
 		}
 		firstRA = true
+		framesReceived.Store(true)
 
 		// Build Annex-B bytestream from NALU access unit
 		naluData := make([]byte, 0, 64*1024)
@@ -253,10 +262,10 @@ func (s *RTSPSource) connect(ctx context.Context) error {
 
 	// Start playback
 	if _, err := client.Play(nil); err != nil {
-		return fmt.Errorf("rtsp play: %w", err)
+		return false, fmt.Errorf("rtsp play: %w", err)
 	}
 
-	log.Printf("camera: rtsp source connected to %s", s.url)
+	slog.Info("camera: rtsp source connected", "url", s.url)
 
 	// Reconnect backoff reset on successful connection
 	// Wait until fatal error or context cancel
@@ -268,8 +277,8 @@ func (s *RTSPSource) connect(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		client.Close()
-		return ctx.Err()
+		return framesReceived.Load(), ctx.Err()
 	case err := <-errCh:
-		return err
+		return framesReceived.Load(), err
 	}
 }

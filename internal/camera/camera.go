@@ -9,7 +9,7 @@ package camera
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -96,6 +96,10 @@ type RPiCamera struct {
 	// binary path
 	binPath string
 
+	// buffer and backoff (configurable via options)
+	frameBufferSize int
+	maxBackoff      time.Duration
+
 	// frame drop tracking
 	droppedFrames atomic.Uint64
 }
@@ -107,6 +111,20 @@ type RPiCameraOption func(*RPiCamera)
 func WithBinPath(path string) RPiCameraOption {
 	return func(c *RPiCamera) {
 		c.binPath = path
+	}
+}
+
+// WithFrameBufferSize sets the frame channel buffer capacity.
+func WithFrameBufferSize(size int) RPiCameraOption {
+	return func(c *RPiCamera) {
+		c.frameBufferSize = size
+	}
+}
+
+// WithMaxBackoff sets the maximum subprocess restart backoff duration.
+func WithMaxBackoff(backoff time.Duration) RPiCameraOption {
+	return func(c *RPiCamera) {
+		c.maxBackoff = backoff
 	}
 }
 
@@ -127,8 +145,10 @@ func WithInfo(info CameraInfo) RPiCameraOption {
 // NewRPiCamera creates a new RPiCamera with the given options.
 func NewRPiCamera(opts ...RPiCameraOption) *RPiCamera {
 	c := &RPiCamera{
-		params:  DefaultParams(),
-		binPath: filepath.Join("deploy", "bin", "mtxrpicam"),
+		params:           DefaultParams(),
+		binPath:          filepath.Join("deploy", "bin", "mtxrpicam"),
+		frameBufferSize:  30,
+		maxBackoff:       30 * time.Second,
 		info: CameraInfo{
 			Name:         "RPi Camera",
 			Manufacturer: "Raspberry Pi",
@@ -169,7 +189,7 @@ func (c *RPiCamera) Start(ctx context.Context) error {
 	// Wrap context with cancel so Stop() can wake up run() from backoff selects
 	c.ctx, c.cancel = context.WithCancel(ctx)
 	c.started = true
-	c.framesCh = make(chan Frame, 30) // buffer ~2 seconds at 15fps
+	c.framesCh = make(chan Frame, c.frameBufferSize)
 
 	c.wg.Add(1)
 	go c.run()
@@ -184,7 +204,7 @@ func (c *RPiCamera) run() {
 	defer c.wg.Done()
 
 	backoff := time.Second
-	const maxBackoff = 30 * time.Second
+	maxBackoff := c.maxBackoff
 
 	for {
 		// Check if we should stop
@@ -198,7 +218,7 @@ func (c *RPiCamera) run() {
 		// Spawn subprocess
 		err := c.spawnSubprocess()
 		if err != nil {
-			log.Printf("camera: spawn failed: %v, retrying in %v", err, backoff)
+			slog.Warn("camera: spawn failed, retrying", "error", err, "backoff", backoff)
 			select {
 			case <-c.ctx.Done():
 				return
@@ -225,7 +245,7 @@ func (c *RPiCamera) run() {
 			return
 		}
 
-		log.Printf("camera: subprocess died, restarting in %v", backoff)
+		slog.Warn("camera: subprocess died, restarting", "backoff", backoff)
 		select {
 		case <-c.ctx.Done():
 			return
@@ -329,7 +349,41 @@ func (c *RPiCamera) spawnSubprocess() error {
 		return fmt.Errorf("send initial config: %w", err)
 	}
 
-	log.Printf("camera: mtxrpicam subprocess started (pid %d)", c.cmd.Process.Pid)
+	// Wait for ready signal from subprocess with 10s timeout
+	readyCh := make(chan struct{}, 1)
+	readErrCh := make(chan error, 1)
+	go func() {
+		for {
+			buf, err := c.videoPipe.read()
+			if err != nil {
+				readErrCh <- err
+				return
+			}
+			if len(buf) > 0 {
+				switch buf[0] {
+				case 'r':
+					readyCh <- struct{}{}
+					return
+				case 'e':
+					readErrCh <- fmt.Errorf("subprocess error during startup: %s", string(buf[1:]))
+					return
+				}
+			}
+		}
+	}()
+
+	select {
+	case <-readyCh:
+		// Subprocess is ready to capture
+	case err := <-readErrCh:
+		c.cleanupSubprocessLocked()
+		return fmt.Errorf("subprocess startup failed: %w", err)
+	case <-time.After(10 * time.Second):
+		c.cleanupSubprocessLocked()
+		return fmt.Errorf("subprocess startup timed out after 10s waiting for ready signal")
+	}
+
+	slog.Info("camera: mtxrpicam subprocess started", "pid", c.cmd.Process.Pid)
 	return nil
 }
 
@@ -372,9 +426,8 @@ func (c *RPiCamera) waitForShutdown() {
 
 	select {
 	case <-done:
-		// run() exited normally
 	case <-time.After(10 * time.Second):
-		log.Printf("camera: Stop timed out waiting for run() goroutine after 10s")
+		slog.Warn("camera: Stop timed out waiting for run() goroutine after 10s")
 	}
 }
 
@@ -390,21 +443,29 @@ func (c *RPiCamera) cleanupSubprocess() {
 func (c *RPiCamera) cleanupSubprocessLocked() {
 	if c.confPipe != nil {
 		if closer, ok := c.confPipe.writer.(interface{ Close() error }); ok {
-			_ = closer.Close()
+			if err := closer.Close(); err != nil {
+			slog.Debug("camera: cleanup confPipe error", "err", err)
+			}
 		}
 		c.confPipe = nil
 	}
 
 	if c.videoPipe != nil {
 		if closer, ok := c.videoPipe.reader.(interface{ Close() error }); ok {
-			_ = closer.Close()
+			if err := closer.Close(); err != nil {
+			slog.Debug("camera: cleanup videoPipe error", "err", err)
+			}
 		}
 		c.videoPipe = nil
 	}
 
 	if c.cmd != nil && c.cmd.Process != nil {
-		_ = c.cmd.Process.Kill()
-		_ = c.cmd.Wait()
+		if err := c.cmd.Process.Kill(); err != nil {
+			slog.Debug("camera: kill subprocess error", "err", err)
+			}
+			if err := c.cmd.Wait(); err != nil {
+			slog.Debug("camera: wait subprocess error", "err", err)
+			}
 		c.cmd = nil
 	}
 }
@@ -503,10 +564,38 @@ func (c *RPiCamera) readLoop() {
 		return
 	}
 
+	var loggedType bool
+
+	// Read timeout: close video pipe after 30s of inactivity
+	var (
+		timeoutMu    sync.Mutex
+		timeoutFired bool
+	)
+	timeoutTimer := time.AfterFunc(30*time.Second, func() {
+		timeoutMu.Lock()
+		timeoutFired = true
+		timeoutMu.Unlock()
+		c.mu.RLock()
+		vp := c.videoPipe
+		c.mu.RUnlock()
+		if vp != nil {
+			if closer, ok := vp.reader.(interface{ Close() error }); ok {
+				_ = closer.Close()
+			}
+		}
+	})
+	defer timeoutTimer.Stop()
 	for {
 		buf, err := videoPipe.read()
 		if err != nil {
-			log.Printf("camera: pipe read error: %v", err)
+			timeoutMu.Lock()
+			fired := timeoutFired
+			timeoutMu.Unlock()
+			if fired {
+				slog.Warn("camera: read timeout - no frame received for 30s, restarting subprocess")
+			} else {
+				slog.Error("camera: pipe read error", "error", err)
+			}
 			return
 		}
 
@@ -516,52 +605,31 @@ func (c *RPiCamera) readLoop() {
 
 		switch buf[0] {
 		case 'e':
-			// Error from subprocess
 			errMsg := string(buf[1:])
-			log.Printf("camera: mtxrpicam error: %s", errMsg)
+			slog.Error("camera: mtxrpicam error", "error", errMsg)
 			return
 
 		case 'r':
 			// Ready signal — subprocess is ready to capture
 			continue
 
-		case 'b': // v1.11.3 binary uses 'b' (master renamed to 'd')
-			// Video frame data
-			if len(buf) < 9 {
+		case 'b', 'd': // v1.11.3 uses 'b', master uses 'd'
+			frame, ok := parseVideoFrame(buf)
+			if !ok {
 				continue
 			}
-
-			// Parse DTS (8 bytes, little-endian)
-			dts := int64(buf[8])<<56 | int64(buf[7])<<48 | int64(buf[6])<<40 |
-				int64(buf[5])<<32 | int64(buf[4])<<24 | int64(buf[3])<<16 |
-				int64(buf[2])<<8 | int64(buf[1])
-
-			// Convert DTS (microseconds) to PTS (90kHz)
-			pts := multiplyAndDivide(dts, 90000, 1e6)
-
-			// Calculate NTP timestamp
-			ntp := time.Now()
-
-			// Extract NALU data (everything after the 9-byte header)
-			naluData := make([]byte, len(buf)-9)
-			copy(naluData, buf[9:])
-
-			frame := Frame{
-				Data:      naluData,
-				Timestamp: ntp,
-				PTS:       pts,
+			if !loggedType {
+				slog.Info("camera: using message type", "type", string(buf[0]))
+				loggedType = true
 			}
-
-			// Non-blocking send — drop frame if channel full
+			timeoutTimer.Reset(30 * time.Second)
 			select {
 			case framesCh <- frame:
 			default:
 				c.droppedFrames.Add(1)
-				// Frame dropped — consumer too slow
 			}
-
 		default:
-			// Unknown message type — ignore
+			slog.Warn("camera: unknown message type", "type", fmt.Sprintf("0x%02x", buf[0])) // was: ignore silently
 			continue
 		}
 	}
@@ -575,43 +643,30 @@ func multiplyAndDivide(v, m, d int64) int64 {
 	return secs*m + dec*m/d
 }
 
-// isIDRFrame checks if the Annex-B NALU data contains an IDR frame.
-// IDR NALU types in H.264: 5 (IDR slice) or SPS (type 7) followed by IDR.
-func isIDRFrame(data []byte) bool {
-	if len(data) < 4 {
-		return false
+// parseVideoFrame extracts a Frame from a video pipe message.
+// Format: [1 byte type][8 bytes DTS LE][NALU data].
+// Works for both 'b' (v1.11.3) and 'd' (master) message types.
+func parseVideoFrame(buf []byte) (Frame, bool) {
+	if len(buf) < 9 {
+		return Frame{}, false
 	}
 
-	// Annex-B start code: 00 00 00 01 or 00 00 01
-	// After start code, NALU header: first byte, lower 5 bits = NALU type
-	// Type 5 = IDR slice
-	i := 0
-	for i < len(data)-3 {
-		if data[i] == 0 && data[i+1] == 0 {
-			// 4-byte start code: 00 00 00 01
-			if i+3 < len(data) && data[i+2] == 0 && data[i+3] == 1 {
-				if i+4 < len(data) {
-					naluType := data[i+4] & 0x1F
-					if naluType == 5 {
-						return true
-					}
-				}
-				i += 5
-				continue
-			}
-			// 3-byte start code: 00 00 01
-			if data[i+2] == 1 {
-				naluType := data[i+3] & 0x1F
-				if naluType == 5 {
-					return true
-				}
-				i += 4
-				continue
-			}
-		}
-		i++
-	}
-	return false
+	// Parse DTS (8 bytes, little-endian, starting at offset 1)
+	dts := int64(buf[8])<<56 | int64(buf[7])<<48 | int64(buf[6])<<40 |
+		int64(buf[5])<<32 | int64(buf[4])<<24 | int64(buf[3])<<16 |
+		int64(buf[2])<<8 | int64(buf[1])
+
+	pts := multiplyAndDivide(dts, 90000, 1e6)
+	ntp := time.Now()
+
+	naluData := make([]byte, len(buf)-9)
+	copy(naluData, buf[9:])
+
+	return Frame{
+		Data:      naluData,
+		Timestamp: ntp,
+		PTS:       pts,
+	}, true
 }
 
 // mapParamName maps user-facing parameter names to internal param field names.

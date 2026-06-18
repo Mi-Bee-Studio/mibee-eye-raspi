@@ -31,6 +31,9 @@ func (p Params) Serialize() ([]byte, error) {
 	for i := range nf {
 		entry := rt.Field(i).Name + ":"
 		f := rv.Field(i)
+		if !supportedParamKind(f.Kind()) {
+			return nil, fmt.Errorf("unsupported param field type: %s has %s", rt.Field(i).Name, f.Kind())
+		}
 		v := f.Interface()
 
 		switch v := v.(type) {
@@ -82,4 +85,10 @@ func DeserializeParamValue(encoded string) (string, error) {
 		return "", err
 	}
 	return string(decoded), nil
+}
+
+// supportedParamKind reports whether k is a permitted parameter field kind.
+// Only uint32, float32, string, and bool are supported in the wire format.
+func supportedParamKind(k reflect.Kind) bool {
+	return k == reflect.Uint32 || k == reflect.Float32 || k == reflect.String || k == reflect.Bool
 }

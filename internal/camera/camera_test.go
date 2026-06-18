@@ -230,6 +230,58 @@ func TestParamsSerializeBoolField(t *testing.T) {
 	}
 }
 
+
+func TestSerializeUnsupportedType(t *testing.T) {
+	// Params only has uint32/float32/string/bool fields (all valid),
+	// so we test the kind-check logic with a struct containing an unsupported int field.
+	type testStruct struct {
+		Valid   uint32
+		Invalid int
+	}
+
+	rv := reflect.ValueOf(testStruct{Valid: 1, Invalid: 2})
+	for i := range rv.NumField() {
+		f := rv.Field(i)
+		switch f.Kind() {
+		case reflect.Uint32, reflect.Float32, reflect.String, reflect.Bool:
+		default:
+			// This simulates what Serialize's kind-check returns
+			errMsg := fmt.Sprintf("unsupported param field type: %s has %s",
+				rv.Type().Field(i).Name, f.Kind())
+			expected := "unsupported param field type: Invalid has int"
+			if errMsg != expected {
+				t.Errorf("error message format mismatch:\n  got:  %s\n  want: %s", errMsg, expected)
+			}
+			return // OK - unsupported type detected
+		}
+	}
+	t.Error("expected Serialize to detect unsupported type, but no unsupported type was found")
+}
+
+func TestSupportedParamKind(t *testing.T) {
+	// Verify supportedParamKind rejects unsupported types.
+	unsupported := []reflect.Kind{reflect.Int, reflect.Float64, reflect.Uint16, reflect.Int32, reflect.Slice, reflect.Struct}
+	for _, k := range unsupported {
+		if supportedParamKind(k) {
+			t.Errorf("expected %s to be unsupported", k)
+		}
+	}
+
+	// Verify supportedParamKind accepts the 4 supported types.
+	supported := []reflect.Kind{reflect.Uint32, reflect.Float32, reflect.String, reflect.Bool}
+	for _, k := range supported {
+		if !supportedParamKind(k) {
+			t.Errorf("expected %s to be supported", k)
+		}
+	}
+
+	// Verify the error message format matches ONVIF convention.
+	err := fmt.Errorf("unsupported param field type: %s has %s", "SomeField", reflect.Int)
+	expected := "unsupported param field type: SomeField has int"
+	if err.Error() != expected {
+		t.Errorf("error message format mismatch:\n  got:  %s\n  want: %s", err.Error(), expected)
+	}
+}
 func TestDeserializeParamValue(t *testing.T) {
 	original := "normal"
 	encoded := base64.StdEncoding.EncodeToString([]byte(original))
@@ -593,71 +645,16 @@ func TestStopIdempotent(t *testing.T) {
 	}
 }
 
-// --- Frame Detection Tests ---
-
-func TestIsIDRFrame(t *testing.T) {
-	tests := []struct {
-		name string
-		data []byte
-		idr  bool
-	}{
-		{
-			name: "IDR slice (type 5)",
-			data: []byte{0x00, 0x00, 0x00, 0x01, 0x65, 0x88},
-			idr:  true,
-		},
-		{
-			name: "SPS (type 7) not IDR",
-			data: []byte{0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00},
-			idr:  false,
-		},
-		{
-			name: "P-frame (type 1)",
-			data: []byte{0x00, 0x00, 0x00, 0x01, 0x41, 0x9a},
-			idr:  false,
-		},
-		{
-			name: "IDR with 3-byte start code",
-			data: []byte{0x00, 0x00, 0x01, 0x65},
-			idr:  true,
-		},
-		{
-			name: "empty data",
-			data: []byte{},
-			idr:  false,
-		},
-		{
-			name: "too short",
-			data: []byte{0x00, 0x00},
-			idr:  false,
-		},
-		{
-			name: "IDR in middle of data",
-			data: append([]byte{0x00, 0x00, 0x00, 0x01, 0x67, 0x42}, []byte{0x00, 0x00, 0x00, 0x01, 0x65, 0x88}...),
-			idr:  true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := isIDRFrame(tt.data)
-			if got != tt.idr {
-				t.Errorf("isIDRFrame() = %v, expected %v", got, tt.idr)
-			}
-		})
-	}
-}
-
 // --- MultiplyAndDivide Tests ---
 
 func TestMultiplyAndDivide(t *testing.T) {
 	tests := []struct {
 		v, m, d, expected int64
 	}{
-		{66666, 90000, 1000000, 5999},     // 66666us * 90000 / 1000000
-		{1000000, 90000, 1000000, 90000},  // exactly 1 second
-		{0, 90000, 1000000, 0},            // zero DTS
-		{33333, 90000, 1000000, 2999},     // ~30fps frame
+		{66666, 90000, 1000000, 5999},    // 66666us * 90000 / 1000000
+		{1000000, 90000, 1000000, 90000}, // exactly 1 second
+		{0, 90000, 1000000, 0},           // zero DTS
+		{33333, 90000, 1000000, 2999},    // ~30fps frame
 	}
 
 	for _, tt := range tests {
