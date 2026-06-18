@@ -5,20 +5,25 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/camera"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/config"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/h264"
+	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/hls"
+	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/metrics"
+	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/netutil"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/onvif"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/ptz"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/rtsp"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/web"
+	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/rtmp"
 )
 
 var (
@@ -27,7 +32,23 @@ var (
 	date    = "unknown"
 )
 
-// configAdapter wraps config.Config to implement onvif.ConfigProvider.
+func initLogging(level string) {
+	var slevel slog.Level
+	switch strings.ToLower(level) {
+	case "debug":
+		slevel = slog.LevelDebug
+	case "warn":
+		slevel = slog.LevelWarn
+	case "error":
+		slevel = slog.LevelError
+	default:
+		slevel = slog.LevelInfo
+	}
+	handler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slevel})
+	slog.SetDefault(slog.New(handler))
+}
+
+// configAdapter wraps config.Config to implement config.ConfigProvider.
 type configAdapter struct {
 	cfg      *config.Config
 	deviceIP string
@@ -51,56 +72,9 @@ func (a *configAdapter) DeviceFirmware() string     { return a.cfg.Device.Firmwa
 func (a *configAdapter) DeviceHardwareID() string   { return a.cfg.Device.HardwareID }
 func (a *configAdapter) DeviceSerialNumber() string { return a.cfg.Device.SerialNumber }
 func (a *configAdapter) LoggingLevel() string       { return a.cfg.Logging.Level }
+func (a *configAdapter) SnapshotEnabled() bool { return a.cfg.Snapshot.Enabled }
+func (a *configAdapter) SnapshotQuality() int  { return a.cfg.Snapshot.Quality }
 
-// detectLocalIP finds the first non-loopback IPv4 address.
-func detectLocalIP() string {
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return "127.0.0.1"
-	}
-	for _, addr := range addrs {
-		if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() && ipnet.IP.To4() != nil {
-			return ipnet.IP.String()
-		}
-	}
-	return "127.0.0.1"
-}
-
-// noOpCamera is a stub camera.Camera used in tests.
-// Imaging parameter changes are validated but not applied to hardware.
-type noOpCamera struct{}
-
-func (c *noOpCamera) Start(ctx context.Context) error          { return nil }
-func (c *noOpCamera) Stop() error                        { return nil }
-func (c *noOpCamera) Frames() <-chan camera.Frame        { return nil }
-func (c *noOpCamera) SetParam(name string, value interface{}) error { return nil }
-func (c *noOpCamera) GetParam(name string) (interface{}, error) {
-	switch name {
-	case "brightness":
-		return 0.0, nil
-	case "contrast":
-		return 1.0, nil
-	case "saturation":
-		return 1.0, nil
-	case "sharpness":
-		return 1.0, nil
-	case "exposure":
-		return 0, nil
-	case "gain":
-		return 1.0, nil
-	case "width":
-		return 1280, nil
-	case "height":
-		return 720, nil
-	case "fps":
-		return 15, nil
-	default:
-		return nil, nil
-	}
-}
-func (c *noOpCamera) Info() camera.CameraInfo {
-	return camera.CameraInfo{}
-}
 func main() {
 	configPath := flag.String("config", "configs/config.yaml", "path to config file")
 	showVersion := flag.Bool("version", false, "print version and exit")
@@ -115,17 +89,19 @@ func main() {
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
+	initLogging(cfg.Logging.Level)
 
 	if cfg.ONVIF.Password == "" {
-		log.Printf("WARNING: ONVIF password is empty. Set onvif.password in config or MIBEE_EYE_ONVIF_PASSWORD env var")
+		slog.Error("ONVIF password must not be empty. Set onvif.password in config or MIBEE_EYE_ONVIF_PASSWORD env var")
+		os.Exit(1)
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
-	localIP := detectLocalIP()
-	log.Printf("MiBee Eye %s starting (fallback IP %s)", version, localIP)
-adapter := &configAdapter{cfg: cfg, deviceIP: localIP}
+	localIP := netutil.DetectLocalIP()
+	slog.Info("MiBee Eye starting", "version", version, "fallback_ip", localIP)
+	adapter := &configAdapter{cfg: cfg, deviceIP: localIP}
 
 	// --- Step 1: Camera ---
 	cameraParams := camera.DefaultParams()
@@ -137,7 +113,7 @@ adapter := &configAdapter{cfg: cfg, deviceIP: localIP}
 	cameraParams.Contrast = float32(cfg.Camera.Contrast)
 	cameraParams.Saturation = float32(cfg.Camera.Saturation)
 	cameraParams.Sharpness = float32(cfg.Camera.Sharpness)
-	cameraParams.IDRPeriod = 15
+	cameraParams.IDRPeriod = uint32(cfg.Camera.IDRPeriod)
 	cameraParams.Codec = "hardwareH264"
 	cameraInfo := camera.CameraInfo{
 		Name:         cfg.Device.Name,
@@ -157,41 +133,64 @@ adapter := &configAdapter{cfg: cfg, deviceIP: localIP}
 		if externalRTSPURL == "" {
 			externalRTSPURL = fmt.Sprintf("rtsp://127.0.0.1:%d/stream", cfg.RTSP.Port)
 		}
-		log.Printf("camera: using external RTSP source: %s", externalRTSPURL)
+		slog.Info("camera: using external RTSP source", "url", externalRTSPURL)
 		cam = camera.NewRTSPSource(externalRTSPURL, cameraParams, cameraInfo)
 	} else {
 		cam = camera.NewRPiCamera(
-			camera.WithBinPath("deploy/bin/mtxrpicam"),
+			camera.WithBinPath(cfg.Camera.BinPath),
 			camera.WithParams(cameraParams),
 			camera.WithInfo(cameraInfo),
+			camera.WithFrameBufferSize(cfg.Camera.FrameBufferSize),
 		)
 	}
 
 	if err := cam.Start(ctx); err != nil {
-		log.Fatalf("camera start: %v", err)
+		slog.Error("camera start", "error", err)
+		os.Exit(1)
 	}
 
+	metricsCollector := metrics.NewCollector()
 	// --- Step 2: H264 Parser + AUHub ---
 	parser := h264.NewParser()
-	auHub := h264.NewAUHub()
+	auHub := h264.NewAUHubWithSize(cfg.RTSP.SubscriberBufferSize)
 	auHub.StartDropLogger(ctx)
 
+	// SnapshotBuffer for /snapshot endpoint
+	snapshotBuffer := onvif.NewSnapshotBuffer(true)
+	go snapshotBuffer.SubscribeToHub(ctx, auHub)
+
 	go func() {
+		// Cache the latest SPS and PPS NALUs so we can inject them before
+		// IDR frames that don't include them (mtxrpicam sends SPS/PPS only
+		// on the first frame, not on subsequent IDR refreshes).
+		var cachedSPS, cachedPPS []byte
 		for frame := range cam.Frames() {
+			metricsCollector.IncFramesCaptured()
 			nalus := parser.Parse(frame.Data)
 			if len(nalus) == 0 {
 				continue
 			}
+
+			// Update SPS/PPS cache.
+			hasSPS, hasPPS, hasIDR := false, false, false
+			for _, n := range nalus {
+				if n.IsSPS { cachedSPS = n.Data; hasSPS = true }
+				if n.IsPPS { cachedPPS = n.Data; hasPPS = true }
+				if n.IsIDR { hasIDR = true }
+			}
+
+			// Inject cached SPS+PPS before IDR if missing.
+			if hasIDR && (!hasSPS || !hasPPS) && cachedSPS != nil && cachedPPS != nil {
+				injected := make([]h264.NALU, 0, len(nalus)+2)
+				if !hasSPS { injected = append(injected, h264.NALU{Type: 7, Data: cachedSPS, IsSPS: true}) }
+				if !hasPPS { injected = append(injected, h264.NALU{Type: 8, Data: cachedPPS, IsPPS: true}) }
+				nalus = append(injected, nalus...)
+			}
+
 			au := h264.AccessUnit{
 				NALUs:     nalus,
 				Timestamp: frame.Timestamp,
-				KeyFrame:  false,
-			}
-			for _, n := range nalus {
-				if n.IsIDR {
-					au.KeyFrame = true
-					break
-				}
+				KeyFrame:  hasIDR,
 			}
 			auHub.Write(au)
 		}
@@ -203,18 +202,22 @@ adapter := &configAdapter{cfg: cfg, deviceIP: localIP}
 	} else {
 		rtspSub := auHub.Subscribe(ctx)
 		rtspServer = rtsp.New(rtsp.Config{
-			Port:     cfg.RTSP.Port,
-			Username: cfg.RTSP.Username,
-			Password: cfg.RTSP.Password,
-			Address:  localIP,
+			Port:           cfg.RTSP.Port,
+			Username:       cfg.RTSP.Username,
+			Password:       cfg.RTSP.Password,
+			Address:        localIP,
+			WriteQueueSize: cfg.RTSP.WriteQueueSize,
+			EnableUDP:      cfg.RTSP.EnableUDP,
+			UDPRTPPort:     cfg.RTSP.UDPRTPPort,
+			UDPRTCPPort:    cfg.RTSP.UDPRTCPPort,
 		})
 		rtspServer.SetFrameSource(rtspSub.Channel)
 
 		if err := rtspServer.Start(ctx); err != nil {
-			log.Fatalf("rtsp server start: %v", err)
+			slog.Error("rtsp server start", "error", err)
+			os.Exit(1)
 		}
 	}
-
 
 	// --- Step 4: ParamManager + PTZ ---
 	paramManager := camera.NewParamManager(cam)
@@ -238,44 +241,150 @@ adapter := &configAdapter{cfg: cfg, deviceIP: localIP}
 	onvif.RegisterMediaHandlers(onvifServer)
 	onvif.RegisterImagingHandlers(onvifServer, paramManager)
 	onvif.RegisterPTZHandlers(onvifServer, ptzState)
+	onvif.RegisterSnapshotHandlers(onvifServer, snapshotBuffer)
 
 	var webServer *web.Server
 	// --- Step 5.5: Web UI Server ---
 	if cfg.Web.Enabled {
 		webServer = web.New(web.Config{
-			Port:        cfg.Web.Port,
-			Username:    cfg.Web.Username,
-			Password:    cfg.Web.Password,
-			ConfigPath:  *configPath,
-			OnvifConfig: adapter,
-			Params:      paramManager,
-			PTZ:         ptzState,
-			AUHub:       auHub,
-			Version:     version,
+			Port:              cfg.Web.Port,
+			Username:          cfg.Web.Username,
+			Password:          cfg.Web.Password,
+			ConfigPath:        *configPath,
+			OnvifConfig:       adapter,
+			Params:            paramManager,
+			PTZ:               ptzState,
+			AUHub:             auHub,
+			Version:           version,
+			ReadHeaderTimeout: cfg.Web.ReadHeaderTimeout,
+			ReadTimeout:       cfg.Web.ReadTimeout,
+			WriteTimeout:      cfg.Web.WriteTimeout,
+			IdleTimeout:       cfg.Web.IdleTimeout,
+			Snapshot:          snapshotBuffer,
 		})
 		go func() {
 			if err := webServer.Start(ctx); err != nil {
-				log.Printf("web server exited: %v", err)
+				slog.Warn("web server exited", "error", err)
 			}
 		}()
+	}
+
+	// --- Step 5.75: HLS Server ---
+	var hlsServer *hls.Server
+	if cfg.HLS.Enabled {
+		hlsServer = hls.New(hls.Config{
+			Hub:             auHub,
+			SegmentDuration: cfg.HLS.SegmentDuration,
+			FPS:             cfg.Camera.FPS,
+		})
+		go hlsServer.Start(ctx)
+
+		// Register HLS HTTP routes on the web server's mux if available,
+		// otherwise start a standalone HTTP server for HLS.
+		if webServer != nil {
+			// HLS routes share the web server's port
+			hlsServer.RegisterHTTP(webServer.Mux())
+		} else {
+			// Start a minimal HLS HTTP server on a separate port (8089)
+			hlsMux := http.NewServeMux()
+			hlsServer.RegisterHTTP(hlsMux)
+			hlsSrv := &http.Server{
+				Addr:              ":8089",
+				Handler:           hlsMux,
+				ReadHeaderTimeout: 5 * time.Second,
+				ReadTimeout:       10 * time.Second,
+				WriteTimeout:      0, // disable for streaming
+				IdleTimeout:       30 * time.Second,
+			}
+			go func() {
+				slog.Info("hls: HTTP server starting", "port", 8089)
+				if err := hlsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+					slog.Warn("hls: HTTP server exited", "error", err)
+				}
+			}()
+			defer hlsSrv.Close()
+		}
+		slog.Info("hls: enabled", "segment_duration", cfg.HLS.SegmentDuration, "fps", cfg.Camera.FPS)
+	} else {
+		slog.Info("hls: disabled")
+	}
+
+	// --- Step 5.8: RTMP Push ---
+	var rtmpPush *rtmp.Push
+	if cfg.RTMP.Enabled {
+		rtmpPush = rtmp.New(rtmp.Config{
+			URL:        cfg.RTMP.URL,
+			Hub:        auHub,
+			MaxRetries: cfg.RTMP.MaxRetries,
+		})
+		if err := rtmpPush.Start(ctx); err != nil {
+			slog.Error("rtmp: push start failed", "error", err)
+			os.Exit(1)
+		}
+		slog.Info("rtmp: push enabled", "url", cfg.RTMP.URL)
+	} else {
+		slog.Info("rtmp: push disabled")
 	}
 
 	// --- Step 6: WS-Discovery ---
 	discovery := onvif.NewDiscovery(cfg, localIP)
 	if err := discovery.StartUDP(ctx); err != nil {
-		log.Printf("warning: failed to start WS-Discovery: %v", err)
+		slog.Warn("warning: failed to start WS-Discovery", "error", err)
 	}
 	onvifServer.SetDiscoveryHandler(http.HandlerFunc(discovery.HandleHTTPProbe))
 
 	// Start ONVIF HTTP server in goroutine
 	go func() {
 		if err := onvifServer.Start(ctx); err != nil {
-			log.Printf("onvif server exited: %v", err)
+			slog.Warn("onvif server exited", "error", err)
 		}
 	}()
 
+	// --- Step 7: Metrics ---
+	if cfg.Metrics.Enabled {
+		metricsMux := http.NewServeMux()
+		metricsMux.Handle("/metrics", metricsCollector)
+		metricsServer := &http.Server{
+			Addr:              fmt.Sprintf(":%d", cfg.Metrics.Port),
+			Handler:           metricsMux,
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       10 * time.Second,
+			WriteTimeout:      10 * time.Second,
+			IdleTimeout:       30 * time.Second,
+		}
+		go func() {
+			slog.Info("metrics: server starting", "port", cfg.Metrics.Port)
+			if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				slog.Warn("metrics: server exited", "error", err)
+			}
+		}()
+		defer metricsServer.Close()
+		
+		// Poll loop: snapshot camera drops, AUHub drops, RTSP clients, camera alive
+		go func() {
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					metricsCollector.SetFramesDropped(auHub.DroppedAUs())
+					if rtspServer != nil {
+						metricsCollector.SetRTSPClients(rtspServer.ClientCount())
+					}
+					// Camera auto-restarts on failure, so it's effectively always alive
+					// once Start() succeeds. Set to 1 unconditionally.
+					metricsCollector.SetCameraAlive(true)
+				}
+			}
+		}()
+		slog.Info("metrics: enabled", "port", cfg.Metrics.Port)
+	} else {
+		slog.Info("metrics: disabled")
+	}
+
+	shutdownStep("hls", 5*time.Second, func() error { return nil })
 	<-ctx.Done()
-	log.Printf("MiBee Eye %s shutting down...", version)
+	slog.Info("MiBee Eye shutting down", "version", version)
 	shutdownStep("discovery", 5*time.Second, func() error { return discovery.StopUDP() })
 	shutdownStep("onvif", 5*time.Second, func() error { return onvifServer.Stop() })
 	shutdownStep("web", 5*time.Second, func() error {
@@ -290,16 +399,22 @@ adapter := &configAdapter{cfg: cfg, deviceIP: localIP}
 		}
 		return nil
 	})
+	shutdownStep("rtmp", 5*time.Second, func() error {
+		if rtmpPush != nil {
+			return rtmpPush.Stop()
+		}
+		return nil
+	})
 	shutdownStep("camera", 5*time.Second, func() error { return cam.Stop() })
 
-	log.Printf("MiBee Eye %s stopped", version)
+	slog.Info("MiBee Eye stopped", "version", version)
 }
 
 // shutdownStep runs a shutdown function with a timeout.
 // If the function does not complete within the timeout, a warning is logged
 // and execution continues to the next step.
 func shutdownStep(name string, timeout time.Duration, fn func() error) {
-	log.Printf("shutdown: stopping %s...", name)
+	slog.Info("shutdown: stopping", "component", name)
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 
@@ -311,11 +426,11 @@ func shutdownStep(name string, timeout time.Duration, fn func() error) {
 	select {
 	case err := <-done:
 		if err != nil {
-			log.Printf("shutdown: %s stopped with error: %v", name, err)
+			slog.Warn("shutdown: stopped with error", "component", name, "error", err)
 		} else {
-			log.Printf("shutdown: %s stopped", name)
+			slog.Info("shutdown: stopped", "component", name)
 		}
 	case <-timer.C:
-		log.Printf("shutdown: %s stop timed out after %v", name, timeout)
+		slog.Warn("shutdown: stop timed out", "component", name, "timeout", timeout)
 	}
 }
