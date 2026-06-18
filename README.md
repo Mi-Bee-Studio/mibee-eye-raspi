@@ -65,7 +65,6 @@ See `configs/config.example.yaml` for all configuration options. Key settings in
 - `onvif.username/password` - ONVIF authentication credentials
 - `web.enabled` - Enable Web admin UI (default: true)
 - `web.port` - Web UI HTTP port (8088 default)
-- `onvif.username/password` - ONVIF authentication credentials
 
 Environment variables override any config setting with `MIBEE_EYE_` prefix:
 ```bash
@@ -88,7 +87,7 @@ sudo systemctl enable --now mibee-eye
 
 The built-in web admin panel provides real-time camera management with modern streaming capabilities:
 
-- **Live Preview** - HLS video player (hls.js library) for smooth browser playback
+- **Live Preview** - HLS (hls.js) and MSE (Media Source Extensions) players for flexible browser playback
 - **Imaging Controls** - Sliders for brightness, contrast, saturation, sharpness; dropdowns for white balance and exposure mode
 
 - **Server Config** - View all configuration sections, edit ONVIF credentials with save-and-restart
@@ -155,14 +154,6 @@ Camera capture via CSI interface supports OV5647, IMX219, IMX708, IMX477 modules
 | RTMP Push | ✅ Built-in | ❌ Extra config needed | — |
 | CPU Usage (720p@15fps) | ~15% | ~24% | 37% reduction |
 
-| Metric | MiBee Eye | MediaMTX | Improvement |
-|--------|---------|----------|-------------|
-| Memory Usage | **15–25 MB** | ~45 MB | 45–67% reduction |
-| ONVIF Server | ✅ **Profile S** (Device/Media/Imaging) | ❌ Not supported | — |
-| CGO Dependencies | **Zero** | CGO required | Painless cross-compile |
-| Camera Control | ✅ Brightness, Contrast, WB, etc. | ❌ None | — |
-| RTMP Push | ✅ Built-in | ❌ Extra config needed | — |
-| CPU Usage (720p@15fps) | ~15% | ~24% | 37% reduction |
 
 | Component | Library | Rationale |
 |-----------|---------|-----------|
@@ -174,16 +165,6 @@ Camera capture via CSI interface supports OV5647, IMX219, IMX708, IMX477 modules
 | Web UI | embedded (no external lib) + hls.js | Lightweight, no external dependencies |
 | Configuration | YAML | Human-readable, easy deployment |
 ### Technology Stack
-
-| Component | Library | Rationale |
-|-----------|---------|-----------|
-| ONVIF Server | Hand-written SOAP | Pure Go, full Device/Media/Imaging |
-| RTSP Server | `bluenviron/gortsplib/v5` | Same as MediaMTX, proven compatibility |
-| RTMP Push | Pure Go implementation | Active maintenance, low footprint |
-| Camera Capture | MediaMTX rpicam (subprocess) | Battle-tested libcamera, no CGO |
-| HLS Bridge | Pure Go MPEG-TS segmenter | No external dependencies, lightweight |
-| Web UI | embedded (no external lib) + hls.js | Lightweight, no external dependencies |
-| Configuration | YAML | Human-readable, easy deployment |
 Built with pure Go — **zero CGO**. Camera capture uses MediaMTX's existing mtxrpicam binary via subprocess pipe for proven CSI camera support, without the CGO cross-compile pain. All protocols (ONVIF, RTMP, HLS, Snapshot) are implemented in pure Go without external libraries.
 
 ## Development
