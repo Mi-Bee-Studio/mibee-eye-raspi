@@ -38,7 +38,7 @@ Several Go ONVIF server libraries were evaluated for this project. The primary r
 
 **Selected**: `0x524a/onvif-go` for primary server implementation due to comprehensive ONVIF support and pure Go architecture.
 
-**Reference**: `ohcnetwork/mock-ptz-camera` used for PTZ implementation patterns and digital PTZ reference architecture.
+**Reference**: `ohcnetwork/mock-ptz-camera` was used for PTZ implementation patterns and digital PTZ reference architecture (PTZ later removed as dead code).
 
 **Rejected**: `rexx/onvif` for limited scope and maintenance; `halayun/onvif-server` for incomplete WS-Security and documentation gaps.
 
@@ -309,7 +309,7 @@ OV5647 Camera → Custom rpicam → gortsplib v5 → Go ONVIF Server → NVR
 2. **Phase 2**: ONVIF device server implementation
 3. **Phase 3**: Camera control (Imaging service)
 4. **Phase 4**: RTMP push capability
-5. **Phase 5**: Advanced features (digital PTZ, snapshot)
+5. **Phase 5**: Advanced features (snapshot)
 
 ### Success Criteria
 
@@ -322,7 +322,7 @@ OV5647 Camera → Custom rpicam → gortsplib v5 → Go ONVIF Server → NVR
 ## References
 
 1. [0x524a/onvif-go](https://github.com/0x524a/onvif-go) - Primary ONVIF server library
-2. [ohcnetwork/mock-ptz-camera](https://github.com/ohcnetwork/mock-ptz-camera) - Digital PTZ reference implementation
+2. [ohcnetwork/mock-ptz-camera](https://github.com/ohcnetwork/mock-ptz-camera) - Go ONVIF reference architecture (PTZ patterns not used)
 3. [bluenviron/mediamtx](https://github.com/bluenviron/mediamtx) - Current RTSP server (issue #1402)
 4. [q191201771/lal](https://github.com/q191201771/lal) - Selected RTMP push library
 5. [vladimirvivien/go4vl](https://github.com/vladimirvivien/go4vl) - Evaluated V4L2 capture (rejected)
