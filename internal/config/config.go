@@ -3,9 +3,11 @@ package config
 import (
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"strconv"
+	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -23,7 +25,11 @@ type CameraConfig struct {
 	Brightness  float64 `yaml:"brightness"`   // -1.0 to 1.0
 	Contrast    float64 `yaml:"contrast"`     // 0.0 to 32.0
 	Saturation  float64 `yaml:"saturation"`   // 0.0 to 32.0
-	Sharpness   float64 `yaml:"sharpness"`    // 0.0 to 16.0
+	Sharpness   float64       `yaml:"sharpness"`    // 0.0 to 16.0
+	IDRPeriod       int           `yaml:"idr_period"`         // Keyframe interval (1=every frame, 15=every 15th)
+	BinPath         string        `yaml:"bin_path"`           // Path to mtxrpicam binary
+	FrameBufferSize int           `yaml:"frame_buffer_size"`  // Frame channel buffer capacity
+	MaxBackoff      time.Duration `yaml:"max_backoff"`        // Max subprocess restart backoff
 }
 
 // RTSPConfig holds RTSP server settings.
@@ -31,6 +37,11 @@ type RTSPConfig struct {
 	Port     int    `yaml:"port"`     // RTSP port
 	Username string `yaml:"username"` // RTSP authentication username
 	Password string `yaml:"password"` // RTSP authentication password
+	SubscriberBufferSize int `yaml:"subscriber_buffer_size"` // AUHub subscriber channel buffer
+	WriteQueueSize      int `yaml:"write_queue_size"`        // gortsplib write queue size
+	EnableUDP           bool `yaml:"enable_udp"`             // Enable UDP transport (default: true, needed for NVR clients)
+	UDPRTPPort          int    `yaml:"udp_rtp_port"`          // UDP RTP port (default: 8000)
+	UDPRTCPPort         int    `yaml:"udp_rtcp_port"`         // UDP RTCP port (default: 8001)
 }
 
 // ONVIFConfig holds ONVIF server settings.
@@ -44,10 +55,15 @@ type ONVIFConfig struct {
 // The web UI serves a single-page admin panel for ONVIF config and camera params.
 // When Username/Password are empty, the web server reuses the ONVIF credentials.
 type WebConfig struct {
-	Enabled  bool   `yaml:"enabled"`  // Enable Web UI server
-	Port     int    `yaml:"port"`     // Web UI HTTP port
-	Username string `yaml:"username"` // HTTP Basic auth user (empty -> onvif.username)
-	Password string `yaml:"password"` // HTTP Basic auth pass (empty -> onvif.password)
+	Enabled        bool     `yaml:"enabled"`
+	Port           int      `yaml:"port"`
+	Username       string   `yaml:"username"`
+	Password       string   `yaml:"password"`
+	AllowedOrigins    []string      `yaml:"allowed_origins"`
+	ReadHeaderTimeout time.Duration `yaml:"read_header_timeout"`
+	ReadTimeout       time.Duration `yaml:"read_timeout"`
+	WriteTimeout      time.Duration `yaml:"write_timeout"`
+	IdleTimeout       time.Duration `yaml:"idle_timeout"`
 }
 
 
@@ -66,6 +82,29 @@ type LoggingConfig struct {
 	Level string `yaml:"level"` // Log level (debug, info, warn, error)
 }
 
+// MetricsConfig holds Prometheus metrics exporter settings.
+type MetricsConfig struct {
+	Enabled bool `yaml:"enabled"` // Enable the metrics HTTP endpoint (default: true)
+	Port    int  `yaml:"port"`    // Metrics HTTP server port (default: 9100)
+}
+
+// SnapshotConfig holds snapshot endpoint settings.
+type SnapshotConfig struct {
+	Enabled bool `yaml:"enabled"` // Enable the snapshot endpoint (default: true)
+	Quality int  `yaml:"quality"` // JPEG quality 1-100 (default: 85, only used for rpicam-still)
+}
+
+// RTMPConfig holds RTMP push client settings.
+type RTMPConfig struct {
+	Enabled    bool   `yaml:"enabled"`     // Enable RTMP push (default: false)
+	URL        string `yaml:"url"`         // RTMP server URL (e.g. rtmp://host:port/app/streamkey)
+	MaxRetries int    `yaml:"max_retries"` // Max reconnection attempts (default: 10)
+}
+// HLSConfig holds HLS live streaming settings.
+type HLSConfig struct {
+	Enabled         bool          `yaml:"enabled"`         // Enable HLS server (default: false)
+	SegmentDuration time.Duration `yaml:"segment_duration"` // Target segment duration (default: 2s)
+}
 // Config is the top-level configuration for MiBee Eye.
 type Config struct {
 	Camera  CameraConfig  `yaml:"camera"`
@@ -73,7 +112,11 @@ type Config struct {
 	ONVIF   ONVIFConfig   `yaml:"onvif"`
 	Device  DeviceConfig  `yaml:"device"`
 	Logging LoggingConfig `yaml:"logging"`
-	Web     WebConfig    `yaml:"web"`
+	Web     WebConfig     `yaml:"web"`
+	Metrics MetricsConfig `yaml:"metrics"`
+	Snapshot SnapshotConfig `yaml:"snapshot"`
+	RTMP     RTMPConfig     `yaml:"rtmp"`
+	HLS      HLSConfig      `yaml:"hls"`
 }
 
 // DefaultConfig returns a Config with all default values.
@@ -91,12 +134,21 @@ func DefaultConfig() *Config {
 			Brightness: 0.0,
 			Contrast:   1.0,
 			Saturation: 1.0,
-			Sharpness:  1.0,
+			Sharpness:      1.0,
+			IDRPeriod:       15,
+			BinPath:         "deploy/bin/mtxrpicam",
+			FrameBufferSize: 30,
+			MaxBackoff:      30 * time.Second,
 		},
 		RTSP: RTSPConfig{
-			Port:     8554,
-			Username: "",
-			Password: "",
+			Port:               8554,
+			Username:           "",
+			Password:           "",
+			SubscriberBufferSize: 64,
+			WriteQueueSize:       2048,
+			EnableUDP:           true,
+			UDPRTPPort:          8000,
+			UDPRTCPPort:         8001,
 		},
 		ONVIF: ONVIFConfig{
 			Port:     8080,
@@ -115,12 +167,32 @@ func DefaultConfig() *Config {
 			Level: "info",
 		},
 		Web: WebConfig{
-			Enabled: true,
-			Port:    8088,
+			Enabled:        true,
+			Port:               8088,
+			AllowedOrigins:     []string{"*"},
+			ReadHeaderTimeout:  5 * time.Second,
+			ReadTimeout:        10 * time.Second,
+			WriteTimeout:       30 * time.Second,
+			IdleTimeout:        120 * time.Second,
 		},
-	}
+		Metrics: MetricsConfig{
+			Enabled: true,
+			Port:    9100,
+		},
+		Snapshot: SnapshotConfig{
+			Enabled: true,
+		},
+		RTMP: RTMPConfig{
+			Enabled:    false,
+			URL:        "",
+			MaxRetries: 10,
+		},
+		HLS: HLSConfig{
+			Enabled:         false,
+			SegmentDuration: 2 * time.Second,
+		},
 }
-
+}
 // Load reads a YAML configuration file at path and returns a Config.
 // Values from the file are merged over DefaultConfig().
 // Environment variables with the MIBEE_EYE_ prefix override both.
@@ -143,13 +215,12 @@ func Load(path string) (*Config, error) {
 	}
 
 	if cfg.ONVIF.Password == "" {
-		log.Printf("WARNING: ONVIF password is empty. Set onvif.password in config or MIBEE_EYE_ONVIF_PASSWORD env var")
+		slog.Warn("WARNING: ONVIF password is empty. Set onvif.password in config or MIBEE_EYE_ONVIF_PASSWORD env var")
 	}
 
 	return cfg, nil
 }
 
-// applyEnvOverrides applies MIBEE_EYE_ prefixed environment variables to config fields.
 // Environment variable names follow the pattern MIBEE_EYE_<SECTION>_<FIELD>.
 func applyEnvOverrides(cfg *Config) {
 	// Camera section
@@ -163,12 +234,19 @@ func applyEnvOverrides(cfg *Config) {
 	overrideFloat("MIBEE_EYE_CAMERA_CONTRAST", &cfg.Camera.Contrast)
 	overrideFloat("MIBEE_EYE_CAMERA_SATURATION", &cfg.Camera.Saturation)
 	overrideFloat("MIBEE_EYE_CAMERA_SHARPNESS", &cfg.Camera.Sharpness)
-
+	overrideInt("MIBEE_EYE_CAMERA_IDR_PERIOD", &cfg.Camera.IDRPeriod)
+	overrideString("MIBEE_EYE_CAMERA_BIN_PATH", &cfg.Camera.BinPath)
+	overrideInt("MIBEE_EYE_CAMERA_FRAME_BUFFER_SIZE", &cfg.Camera.FrameBufferSize)
+	overrideDuration("MIBEE_EYE_CAMERA_MAX_BACKOFF", &cfg.Camera.MaxBackoff)
 	// RTSP section
 	overrideInt("MIBEE_EYE_RTSP_PORT", &cfg.RTSP.Port)
 	overrideString("MIBEE_EYE_RTSP_USERNAME", &cfg.RTSP.Username)
 	overrideString("MIBEE_EYE_RTSP_PASSWORD", &cfg.RTSP.Password)
-
+	overrideInt("MIBEE_EYE_RTSP_SUBSCRIBER_BUFFER_SIZE", &cfg.RTSP.SubscriberBufferSize)
+	overrideInt("MIBEE_EYE_RTSP_WRITE_QUEUE_SIZE", &cfg.RTSP.WriteQueueSize)
+	overrideBool("MIBEE_EYE_RTSP_ENABLE_UDP", &cfg.RTSP.EnableUDP)
+	overrideInt("MIBEE_EYE_RTSP_UDP_RTP_PORT", &cfg.RTSP.UDPRTPPort)
+	overrideInt("MIBEE_EYE_RTSP_UDP_RTCP_PORT", &cfg.RTSP.UDPRTCPPort)
 	// ONVIF section
 	overrideInt("MIBEE_EYE_ONVIF_PORT", &cfg.ONVIF.Port)
 	overrideString("MIBEE_EYE_ONVIF_USERNAME", &cfg.ONVIF.Username)
@@ -178,7 +256,14 @@ func applyEnvOverrides(cfg *Config) {
 	overrideInt("MIBEE_EYE_WEB_PORT", &cfg.Web.Port)
 	overrideString("MIBEE_EYE_WEB_USERNAME", &cfg.Web.Username)
 	overrideString("MIBEE_EYE_WEB_PASSWORD", &cfg.Web.Password)
-
+	overrideStringSlice("MIBEE_EYE_WEB_ALLOWED_ORIGINS", &cfg.Web.AllowedOrigins)
+	overrideDuration("MIBEE_EYE_WEB_READ_HEADER_TIMEOUT", &cfg.Web.ReadHeaderTimeout)
+	overrideDuration("MIBEE_EYE_WEB_READ_TIMEOUT", &cfg.Web.ReadTimeout)
+	overrideDuration("MIBEE_EYE_WEB_WRITE_TIMEOUT", &cfg.Web.WriteTimeout)
+	overrideDuration("MIBEE_EYE_WEB_IDLE_TIMEOUT", &cfg.Web.IdleTimeout)
+	// Metrics section
+	overrideBool("MIBEE_EYE_METRICS_ENABLED", &cfg.Metrics.Enabled)
+	overrideInt("MIBEE_EYE_METRICS_PORT", &cfg.Metrics.Port)
 	// Device section
 	overrideString("MIBEE_EYE_DEVICE_NAME", &cfg.Device.Name)
 	overrideString("MIBEE_EYE_DEVICE_MANUFACTURER", &cfg.Device.Manufacturer)
@@ -189,6 +274,17 @@ func applyEnvOverrides(cfg *Config) {
 
 	// Logging section
 	overrideString("MIBEE_EYE_LOGGING_LEVEL", &cfg.Logging.Level)
+	// Snapshot section
+	overrideBool("MIBEE_EYE_SNAPSHOT_ENABLED", &cfg.Snapshot.Enabled)
+	overrideInt("MIBEE_EYE_SNAPSHOT_QUALITY", &cfg.Snapshot.Quality)
+
+	// RTMP section
+	overrideBool("MIBEE_EYE_RTMP_ENABLED", &cfg.RTMP.Enabled)
+	overrideString("MIBEE_EYE_RTMP_URL", &cfg.RTMP.URL)
+	overrideInt("MIBEE_EYE_RTMP_MAX_RETRIES", &cfg.RTMP.MaxRetries)
+	// HLS section
+	overrideBool("MIBEE_EYE_HLS_ENABLED", &cfg.HLS.Enabled)
+	overrideDuration("MIBEE_EYE_HLS_SEGMENT_DURATION", &cfg.HLS.SegmentDuration)
 }
 
 // Sentinel errors for config validation.
@@ -228,6 +324,33 @@ func (c *Config) Validate() error {
 	if c.Camera.Codec != "h264" && c.Camera.Codec != "h265" {
 		return fmt.Errorf("config.camera.codec: %w", errInvalidCodec)
 	}
+	if c.Camera.IDRPeriod <= 0 {
+		return fmt.Errorf("config.camera.idr_period: %w", errMustBePositive)
+	}
+	if c.Camera.FrameBufferSize <= 0 {
+		return fmt.Errorf("config.camera.frame_buffer_size: %w", errMustBePositive)
+	}
+	if c.Camera.MaxBackoff <= 0 {
+		return fmt.Errorf("config.camera.max_backoff: %w", errMustBePositive)
+	}
+	if c.RTSP.SubscriberBufferSize <= 0 {
+		return fmt.Errorf("config.rtsp.subscriber_buffer_size: %w", errMustBePositive)
+	}
+	if c.RTSP.WriteQueueSize <= 0 {
+		return fmt.Errorf("config.rtsp.write_queue_size: %w", errMustBePositive)
+	}
+	if c.Web.ReadHeaderTimeout < 0 {
+		return fmt.Errorf("config.web.read_header_timeout: must not be negative")
+	}
+	if c.Web.ReadTimeout < 0 {
+		return fmt.Errorf("config.web.read_timeout: must not be negative")
+	}
+	if c.Web.WriteTimeout < 0 {
+		return fmt.Errorf("config.web.write_timeout: must not be negative")
+	}
+	if c.Web.IdleTimeout < 0 {
+		return fmt.Errorf("config.web.idle_timeout: must not be negative")
+	}
 	if c.RTSP.Port <= 0 {
 		return fmt.Errorf("config.rtsp.port: %w", errMustBePositive)
 	}
@@ -242,6 +365,12 @@ func (c *Config) Validate() error {
 		// valid
 	default:
 		return fmt.Errorf("config.logging.level: %w", errInvalidLogLevel)
+	}
+	if c.Metrics.Enabled && c.Metrics.Port <= 0 {
+		return fmt.Errorf("config.metrics.port: %w", errMustBePositive)
+	}
+	if c.Snapshot.Enabled && (c.Snapshot.Quality < 0 || c.Snapshot.Quality > 100) {
+		return fmt.Errorf("config.snapshot.quality: must be between 0 and 100, got %d", c.Snapshot.Quality)
 	}
 	return nil
 }
@@ -272,6 +401,24 @@ func overrideBool(envName string, dest *bool) {
 	if v, ok := os.LookupEnv(envName); ok {
 		if b, err := strconv.ParseBool(v); err == nil {
 			*dest = b
+		}
+	}
+}
+
+func overrideStringSlice(envName string, dest *[]string) {
+	if v, ok := os.LookupEnv(envName); ok && v != "" {
+		parts := strings.Split(v, ",")
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		*dest = parts
+	}
+}
+
+func overrideDuration(envName string, dest *time.Duration) {
+	if v, ok := os.LookupEnv(envName); ok {
+		if d, err := time.ParseDuration(v); err == nil {
+			*dest = d
 		}
 	}
 }

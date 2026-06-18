@@ -34,6 +34,18 @@ camera:
   # Sharpness: 0.0 to 16.0 (1.0 = default)
   sharpness: 1.0
 
+  # Keyframe interval (1=every frame, 15=every 15th frame)
+  idr_period: 15
+
+  # Path to mtxrpicam binary
+  bin_path: deploy/bin/mtxrpicam
+
+  # Frame channel buffer capacity (frames)
+  frame_buffer_size: 30
+
+  # Maximum subprocess restart backoff duration
+  max_backoff: 30s
+
 # RTSP server settings
 rtsp:
   # RTSP port (MediaMTX default: 8554)
@@ -42,6 +54,12 @@ rtsp:
   # Optional RTSP authentication (leave empty for no auth)
   username: ""
   password: ""
+
+  # AUHub subscriber channel buffer size
+  subscriber_buffer_size: 64
+
+  # gortsplib write queue size (256 default too small for WiFi)
+  write_queue_size: 2048
 
 # ONVIF server settings
 onvif:
@@ -89,3 +107,18 @@ web:
   # (i.e. web.Username = onvif.Username, web.Password = onvif.Password).
   username: ""
   password: ""
+
+  # HTTP server timeouts (leave at 0 for defaults)
+  read_header_timeout: 5s
+  read_timeout: 10s
+  write_timeout: 30s
+  idle_timeout: 120s
+
+# RTMP push settings (disabled by default)
+rtmp:
+  # Enable RTMP push to remote server
+  enabled: false
+  # RTMP server URL (e.g. rtmp://your-server.com/live/streamkey)
+  url: ""
+  # Maximum reconnection attempts (0 = unlimited)
+  max_retries: 10
