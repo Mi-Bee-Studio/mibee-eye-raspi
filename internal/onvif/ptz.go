@@ -166,12 +166,43 @@ type PTZSpeed struct {
 	Zoom    *Vector1D `xml:"Zoom,omitempty"`
 }
 
-// Generic PTZ request envelope parser — extracts Velocity or Position from inner XML.
-type ptzRequestEnvelope struct {
-	Body struct {
-		RawXML string `xml:",innerxml"`
-	} `xml:"Body"`
-}
+	// ---------------------------------------------------------------------------
+	// PTZ request parsing types (namespace-agnostic, used with unmarshalAnyNS)
+	// ---------------------------------------------------------------------------
+
+	type continuousMoveRequest struct {
+		ProfileToken string         `xml:"ProfileToken"`
+		Velocity     velocityBody   `xml:"Velocity"`
+	}
+
+	type absoluteMoveRequest struct {
+		ProfileToken string        `xml:"ProfileToken"`
+		Position     positionBody  `xml:"Position"`
+	}
+
+	type relativeMoveRequest struct {
+		ProfileToken string        `xml:"ProfileToken"`
+		Translation  velocityBody  `xml:"Translation"`
+	}
+
+	type velocityBody struct {
+		PanTilt *panTiltBody `xml:"PanTilt"`
+		Zoom    *zoomBody    `xml:"Zoom"`
+	}
+
+	type positionBody struct {
+		PanTilt *panTiltBody `xml:"PanTilt"`
+		Zoom    *zoomBody    `xml:"Zoom"`
+	}
+
+	type panTiltBody struct {
+		X float64 `xml:"x,attr"`
+		Y float64 `xml:"y,attr"`
+	}
+
+	type zoomBody struct {
+		X float64 `xml:"x,attr"`
+	}
 
 // ---------------------------------------------------------------------------
 // Handler registration
@@ -232,33 +263,6 @@ func RegisterPTZHandlers(s *Server, ptzState *ptz.State) {
 // SOAP action handlers
 // ---------------------------------------------------------------------------
 
-// parsePTZVelocity extracts Velocity from SOAP body inner XML.
-// Handles various namespace prefixes for PanTilt and Zoom elements.
-func parsePTZVelocity(body []byte) ptz.Velocity {
-	vel := ptz.Velocity{}
-	s := string(body)
-
-	// Parse PanTilt x,y — look for x and y attributes near "PanTilt"
-	vel.Pan = parseFloatAttr(s, "PanTilt", "x")
-	vel.Tilt = parseFloatAttr(s, "PanTilt", "y")
-
-	// Parse Zoom x
-	vel.Zoom = parseFloatAttr(s, "Zoom", "x")
-
-	return vel
-}
-
-// parsePTZPosition extracts Position from SOAP body inner XML.
-func parsePTZPosition(body []byte) ptz.Position {
-	pos := ptz.Position{}
-	s := string(body)
-
-	pos.Pan = parseFloatAttr(s, "PanTilt", "x")
-	pos.Tilt = parseFloatAttr(s, "PanTilt", "y")
-	pos.Zoom = parseFloatAttr(s, "Zoom", "x")
-
-	return pos
-}
 
 // parsePresetToken extracts preset token from SOAP body.
 func parsePresetToken(body []byte) string {
@@ -287,55 +291,54 @@ func parsePresetToken(body []byte) string {
 	return strings.TrimSpace(content[:end])
 }
 
-// parseFloatAttr extracts a float attribute value from XML near a given tag.
-// It looks for the tag, then finds the specified attribute nearby.
-func parseFloatAttr(xmlStr, tagName, attrName string) float64 {
-	// Find the tag
-	tagIdx := strings.Index(xmlStr, tagName)
-	if tagIdx == -1 {
-		return 0
-	}
-
-	// Search forward for the attribute within reasonable distance
-	rest := xmlStr[tagIdx:]
-	maxSearch := 200
-	if len(rest) < maxSearch {
-		maxSearch = len(rest)
-	}
-	rest = rest[:maxSearch]
-
-	// Look for attrName="
-	attrStr := attrName + `="`
-	idx := strings.Index(rest, attrStr)
-	if idx == -1 {
-		return 0
-	}
-
-	rest = rest[idx+len(attrStr):]
-	end := strings.Index(rest, `"`)
-	if end == -1 {
-		return 0
-	}
-
-	var val float64
-	fmt.Sscanf(rest[:end], "%f", &val)
-	return val
-}
 
 func handleContinuousMove(body []byte, state *ptz.State) (interface{}, error) {
-	vel := parsePTZVelocity(body)
+	var req continuousMoveRequest
+	if err := unmarshalAnyNS(body, &req); err != nil {
+		return nil, fmt.Errorf("malformed PTZ request: %w", err)
+	}
+	vel := ptz.Velocity{}
+	if req.Velocity.PanTilt != nil {
+		vel.Pan = req.Velocity.PanTilt.X
+		vel.Tilt = req.Velocity.PanTilt.Y
+	}
+	if req.Velocity.Zoom != nil {
+		vel.Zoom = req.Velocity.Zoom.X
+	}
 	state.ContinuousMove(vel)
 	return &ContinuousMoveResponse{}, nil
 }
 
 func handleAbsoluteMove(body []byte, state *ptz.State) (interface{}, error) {
-	pos := parsePTZPosition(body)
+	var req absoluteMoveRequest
+	if err := unmarshalAnyNS(body, &req); err != nil {
+		return nil, fmt.Errorf("malformed PTZ request: %w", err)
+	}
+	pos := ptz.Position{}
+	if req.Position.PanTilt != nil {
+		pos.Pan = req.Position.PanTilt.X
+		pos.Tilt = req.Position.PanTilt.Y
+	}
+	if req.Position.Zoom != nil {
+		pos.Zoom = req.Position.Zoom.X
+	}
 	state.AbsoluteMove(pos)
 	return &AbsoluteMoveResponse{}, nil
 }
 
 func handleRelativeMove(body []byte, state *ptz.State) (interface{}, error) {
-	vel := parsePTZVelocity(body)
+	var req relativeMoveRequest
+	if err := unmarshalAnyNS(body, &req); err != nil {
+		return nil, fmt.Errorf("malformed PTZ request: %w", err)
+	}
+	vel := ptz.Velocity{}
+	if req.Translation.PanTilt != nil {
+		vel.Pan = req.Translation.PanTilt.X
+		vel.Tilt = req.Translation.PanTilt.Y
+	}
+	if req.Translation.Zoom != nil {
+		vel.Zoom = req.Translation.Zoom.X
+	}
 	state.RelativeMove(vel)
 	return &RelativeMoveResponse{}, nil
 }

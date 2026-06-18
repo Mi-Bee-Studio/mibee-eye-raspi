@@ -122,6 +122,7 @@ type imagingSettingsRequest struct {
 	Saturation   *floatItemRequest `xml:"ColorSaturation"`
 	Sharpness    *floatItemRequest `xml:"Sharpness"`
 	Exposure     *exposureRequest  `xml:"Exposure"`
+	WhiteBalance *whiteBalanceRequest `xml:"WhiteBalance"`
 }
 
 type floatItemRequest struct {
@@ -131,6 +132,12 @@ type floatItemRequest struct {
 type exposureRequest struct {
 	Mode string  `xml:"Mode"`
 	Time float64 `xml:"ExposureTime"`
+}
+
+type whiteBalanceRequest struct {
+	Mode   string  `xml:"Mode"`
+	CrGain float64 `xml:"CrGain"`
+	CbGain float64 `xml:"CbGain"`
 }
 
 // ---------------------------------------------------------------------------
@@ -176,6 +183,24 @@ func handleGetImagingSettings(pm *camera.ParamManager) (*GetImagingSettingsRespo
 		return nil, fmt.Errorf("get exposure time: %w", err)
 	}
 
+	// Map camera exposure mode to ONVIF AUTO/MANUAL
+	// Camera "normal" = ONVIF AUTO, "custom" = ONVIF MANUAL
+	exposureMode := "AUTO"
+	if rawMode, err := pm.Get("ExposureMode"); err == nil {
+		if mode, ok := rawMode.(string); ok && mode == "custom" {
+			exposureMode = "MANUAL"
+		}
+	}
+
+	// Map camera AWB mode to ONVIF AUTO/MANUAL
+	// Camera "auto" = ONVIF AUTO, anything else = ONVIF MANUAL
+	wbMode := "AUTO"
+	if rawMode, err := pm.Get("AWBMode"); err == nil {
+		if mode, ok := rawMode.(string); ok && mode != "auto" {
+			wbMode = "MANUAL"
+		}
+	}
+
 	return &GetImagingSettingsResponse{
 		Settings: ImagingSettings{
 			Brightness: &FloatItem{Value: toFloat(brightness)},
@@ -183,11 +208,11 @@ func handleGetImagingSettings(pm *camera.ParamManager) (*GetImagingSettingsRespo
 			Saturation: &FloatItem{Value: toFloat(saturation)},
 			Sharpness:  &FloatItem{Value: toFloat(sharpness)},
 			Exposure: &Exposure{
-				Mode: "AUTO",
+				Mode: exposureMode,
 				Time: toFloat(exposureTime),
 			},
 			WhiteBalance: &WhiteBalance{
-				Mode: "AUTO",
+				Mode: wbMode,
 			},
 		},
 	}, nil
@@ -220,9 +245,31 @@ func handleSetImagingSettings(pm *camera.ParamManager, body []byte) error {
 			return err
 		}
 	}
-	if req.Settings.Exposure != nil && req.Settings.Exposure.Mode == "MANUAL" {
-		if err := pm.Set("ExposureTime", req.Settings.Exposure.Time); err != nil {
-			return err
+	if req.Settings.Exposure != nil {
+		switch req.Settings.Exposure.Mode {
+		case "MANUAL":
+			if err := pm.Set("ExposureMode", "custom"); err != nil {
+				return err
+			}
+			if err := pm.Set("ExposureTime", req.Settings.Exposure.Time); err != nil {
+				return err
+			}
+		case "AUTO":
+			if err := pm.Set("ExposureMode", "normal"); err != nil {
+				return err
+			}
+		}
+	}
+	if req.Settings.WhiteBalance != nil {
+		switch req.Settings.WhiteBalance.Mode {
+		case "MANUAL":
+			if err := pm.Set("AWBMode", "custom"); err != nil {
+				return err
+			}
+		case "AUTO":
+			if err := pm.Set("AWBMode", "auto"); err != nil {
+				return err
+			}
 		}
 	}
 

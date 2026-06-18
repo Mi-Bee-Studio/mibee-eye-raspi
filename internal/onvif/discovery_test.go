@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/config"
+	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/netutil"
 )
 
 // NVR probe template (matches NVR's wsDiscoveryProbe with 2005/04 namespace).
@@ -97,7 +98,7 @@ func TestBuildProbeMatches(t *testing.T) {
 	// Verify ProbeMatch structure
 	if !strings.Contains(body, "<d:ProbeMatch>") {
 		t.Fatal("missing ProbeMatch element")
-}
+	}
 }
 
 func TestBuildProbeMatchesPerHostIP(t *testing.T) {
@@ -238,7 +239,7 @@ func TestScopeFormat(t *testing.T) {
 }
 
 func TestDetectLocalIP(t *testing.T) {
-	ip := detectLocalIP()
+	ip := netutil.DetectLocalIP()
 
 	if ip == "" {
 		t.Fatal("detectLocalIP returned empty string")
@@ -312,4 +313,3 @@ func TestDiscoveryDefaultsWithEmptyConfig(t *testing.T) {
 		t.Fatalf("XAddr should contain provided IP, got %s", xaddrs[0])
 	}
 }
-

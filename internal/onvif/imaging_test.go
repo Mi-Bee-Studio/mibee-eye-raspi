@@ -22,11 +22,14 @@ type mockImagingCamera struct {
 func newMockImagingCamera() *mockImagingCamera {
 	return &mockImagingCamera{
 		params: map[string]interface{}{
-			"brightness": float64(0.0),
-			"contrast":   float64(1.0),
-			"saturation": float64(1.0),
-			"sharpness":  float64(1.0),
-			"exposure":   float64(0),
+			"brightness":    float64(0.0),
+			"contrast":      float64(1.0),
+			"saturation":    float64(1.0),
+			"sharpness":     float64(1.0),
+			"shutter":       float64(0),
+			"gain":          float64(1.0),
+			"exposureMode":  "normal",
+			"awbMode":       "auto",
 		},
 	}
 }
@@ -500,5 +503,181 @@ func TestGetImagingSettingsMarshalling(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("response XML missing %q\nBody:\n%s", want, body)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Round-trip integration: Set→Get exposure/WB mode tracking
+// ---------------------------------------------------------------------------
+
+func TestSetImagingSettingsExposureManual(t *testing.T) {
+	mock := newMockImagingCamera()
+	pm := camera.NewParamManager(mock)
+
+	// Step 1: Set exposure to MANUAL with exposureTime=10000
+	soapBody := `<?xml version="1.0" encoding="UTF-8"?>
+<timg:SetImagingSettings xmlns:timg="http://www.onvif.org/ver20/imaging/wsdl"
+                         xmlns:tt="http://www.onvif.org/ver10/schema">
+  <timg:Settings>
+    <tt:Exposure>
+      <tt:Mode>MANUAL</tt:Mode>
+      <tt:ExposureTime>10000</tt:ExposureTime>
+    </tt:Exposure>
+  </timg:Settings>
+</timg:SetImagingSettings>`
+
+	err := handleSetImagingSettings(pm, []byte(soapBody))
+	if err != nil {
+		t.Fatalf("handleSetImagingSettings failed: %v", err)
+	}
+
+	// Verify camera state directly
+	if got := mock.getParam("exposureMode"); got != "custom" {
+		t.Errorf("expected camera exposureMode=custom, got %v", got)
+	}
+
+	// Step 2: Get imaging settings and verify round-trip
+	resp, err := handleGetImagingSettings(pm)
+	if err != nil {
+		t.Fatalf("handleGetImagingSettings failed: %v", err)
+	}
+
+	if resp.Settings.Exposure == nil {
+		t.Fatal("expected Exposure in response")
+	}
+	if resp.Settings.Exposure.Mode != "MANUAL" {
+		t.Errorf("expected Exposure.Mode=MANUAL, got %q", resp.Settings.Exposure.Mode)
+	}
+	if resp.Settings.Exposure.Time != 10000 {
+		t.Errorf("expected Exposure.Time=10000, got %v", resp.Settings.Exposure.Time)
+	}
+}
+
+func TestSetImagingSettingsExposureAuto(t *testing.T) {
+	mock := newMockImagingCamera()
+	pm := camera.NewParamManager(mock)
+
+	// Start with MANUAL exposure
+	if err := pm.Set("ExposureMode", "custom"); err != nil {
+		t.Fatalf("set exposureMode failed: %v", err)
+	}
+	if err := pm.Set("ExposureTime", float64(5000)); err != nil {
+		t.Fatalf("set exposureTime failed: %v", err)
+	}
+
+	// Set back to AUTO
+	soapBody := `<?xml version="1.0" encoding="UTF-8"?>
+<timg:SetImagingSettings xmlns:timg="http://www.onvif.org/ver20/imaging/wsdl"
+                         xmlns:tt="http://www.onvif.org/ver10/schema">
+  <timg:Settings>
+    <tt:Exposure>
+      <tt:Mode>AUTO</tt:Mode>
+    </tt:Exposure>
+  </timg:Settings>
+</timg:SetImagingSettings>`
+
+	err := handleSetImagingSettings(pm, []byte(soapBody))
+	if err != nil {
+		t.Fatalf("handleSetImagingSettings failed: %v", err)
+	}
+
+	resp, err := handleGetImagingSettings(pm)
+	if err != nil {
+		t.Fatalf("handleGetImagingSettings failed: %v", err)
+	}
+
+	if resp.Settings.Exposure == nil {
+		t.Fatal("expected Exposure in response")
+	}
+	if resp.Settings.Exposure.Mode != "AUTO" {
+		t.Errorf("expected Exposure.Mode=AUTO after switching back, got %q", resp.Settings.Exposure.Mode)
+	}
+}
+
+func TestSetImagingSettingsWhiteBalanceManual(t *testing.T) {
+	mock := newMockImagingCamera()
+	pm := camera.NewParamManager(mock)
+
+	// Step 1: Set WB to MANUAL
+	soapBody := `<?xml version="1.0" encoding="UTF-8"?>
+<timg:SetImagingSettings xmlns:timg="http://www.onvif.org/ver20/imaging/wsdl"
+                         xmlns:tt="http://www.onvif.org/ver10/schema">
+  <timg:Settings>
+    <tt:WhiteBalance>
+      <tt:Mode>MANUAL</tt:Mode>
+    </tt:WhiteBalance>
+  </timg:Settings>
+</timg:SetImagingSettings>`
+
+	err := handleSetImagingSettings(pm, []byte(soapBody))
+	if err != nil {
+		t.Fatalf("handleSetImagingSettings failed: %v", err)
+	}
+
+	// Verify camera state directly
+	if got := mock.getParam("awbMode"); got != "custom" {
+		t.Errorf("expected camera awbMode=custom, got %v", got)
+	}
+
+	// Step 2: Get and verify
+	resp, err := handleGetImagingSettings(pm)
+	if err != nil {
+		t.Fatalf("handleGetImagingSettings failed: %v", err)
+	}
+
+	if resp.Settings.WhiteBalance == nil {
+		t.Fatal("expected WhiteBalance in response")
+	}
+	if resp.Settings.WhiteBalance.Mode != "MANUAL" {
+		t.Errorf("expected WhiteBalance.Mode=MANUAL, got %q", resp.Settings.WhiteBalance.Mode)
+	}
+}
+
+func TestExposureWBRoundTripMixed(t *testing.T) {
+	mock := newMockImagingCamera()
+	pm := camera.NewParamManager(mock)
+
+	// Set exposure MANUAL + WB AUTO in one request
+	soapBody := `<?xml version="1.0" encoding="UTF-8"?>
+<timg:SetImagingSettings xmlns:timg="http://www.onvif.org/ver20/imaging/wsdl"
+                         xmlns:tt="http://www.onvif.org/ver10/schema">
+  <timg:Settings>
+    <tt:Exposure>
+      <tt:Mode>MANUAL</tt:Mode>
+      <tt:ExposureTime>20000</tt:ExposureTime>
+    </tt:Exposure>
+    <tt:WhiteBalance>
+      <tt:Mode>AUTO</tt:Mode>
+    </tt:WhiteBalance>
+  </timg:Settings>
+</timg:SetImagingSettings>`
+
+	err := handleSetImagingSettings(pm, []byte(soapBody))
+	if err != nil {
+		t.Fatalf("handleSetImagingSettings failed: %v", err)
+	}
+
+	resp, err := handleGetImagingSettings(pm)
+	if err != nil {
+		t.Fatalf("handleGetImagingSettings failed: %v", err)
+	}
+
+	// Exposure should be MANUAL
+	if resp.Settings.Exposure == nil {
+		t.Fatal("expected Exposure")
+	}
+	if resp.Settings.Exposure.Mode != "MANUAL" {
+		t.Errorf("expected Exposure.Mode=MANUAL, got %q", resp.Settings.Exposure.Mode)
+	}
+	if resp.Settings.Exposure.Time != 20000 {
+		t.Errorf("expected Exposure.Time=20000, got %v", resp.Settings.Exposure.Time)
+	}
+
+	// WhiteBalance should be AUTO
+	if resp.Settings.WhiteBalance == nil {
+		t.Fatal("expected WhiteBalance")
+	}
+	if resp.Settings.WhiteBalance.Mode != "AUTO" {
+		t.Errorf("expected WhiteBalance.Mode=AUTO, got %q", resp.Settings.WhiteBalance.Mode)
 	}
 }

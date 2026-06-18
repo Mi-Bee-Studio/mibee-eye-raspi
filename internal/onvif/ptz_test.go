@@ -504,28 +504,6 @@ func TestPTZEndToEndSequence(t *testing.T) {
 	}
 }
 
-func TestParseFloatAttr(t *testing.T) {
-	tests := []struct {
-		xml    string
-		tag    string
-		attr   string
-		expect float64
-	}{
-		{`<PanTilt x="0.5" y="0.3"/>`, "PanTilt", "x", 0.5},
-		{`<PanTilt x="0.5" y="0.3"/>`, "PanTilt", "y", 0.3},
-		{`<Zoom x="0.8"/>`, "Zoom", "x", 0.8},
-		{`<tt:PanTilt x="-1.0" y="1.0"/>`, "PanTilt", "x", -1.0},
-		{`<PanTilt y="0.3"/>`, "PanTilt", "x", 0}, // missing attr
-		{`<Other x="0.5"/>`, "PanTilt", "x", 0},    // missing tag
-	}
-
-	for _, tt := range tests {
-		got := parseFloatAttr(tt.xml, tt.tag, tt.attr)
-		if got != tt.expect {
-			t.Errorf("parseFloatAttr(%q, %q, %q) = %f, want %f", tt.xml, tt.tag, tt.attr, got, tt.expect)
-		}
-	}
-}
 
 func TestParsePresetToken(t *testing.T) {
 	tests := []struct {
@@ -543,4 +521,85 @@ func TestParsePresetToken(t *testing.T) {
 			t.Errorf("parsePresetToken(%q) = %q, want %q", tt.body, got, tt.expect)
 		}
 	}
+}
+func TestPTZContinuousMoveMalformedXML(t *testing.T) {
+	srv, _ := ptzTestServer()
+
+	// Non-numeric attribute value causes XML unmarshal to fail
+	w := sendPTZRequestWithAuth(srv, `<tptz:ContinuousMove>
+		<tptz:ProfileToken>main</tptz:ProfileToken>
+		<tptz:Velocity>
+			<tt:PanTilt x="not-a-number" y="0"/>
+		</tptz:Velocity>
+	</tptz:ContinuousMove>`)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 for malformed XML, got %d. Body: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "Fault") {
+		t.Errorf("expected SOAP Fault, got: %s", w.Body.String())
+	}
+}
+
+func TestPTZAbsoluteMoveMalformedXML(t *testing.T) {
+	srv, _ := ptzTestServer()
+
+	w := sendPTZRequestWithAuth(srv, `<tptz:AbsoluteMove>
+		<tptz:ProfileToken>main</tptz:ProfileToken>
+		<tptz:Position>
+			<tt:PanTilt x="0.5" y="not-valid"/>
+		</tptz:Position>
+	</tptz:AbsoluteMove>`)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 for malformed XML, got %d. Body: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "Fault") {
+		t.Errorf("expected SOAP Fault, got: %s", w.Body.String())
+	}
+}
+
+func TestPTZRelativeMoveMalformedXML(t *testing.T) {
+	srv, _ := ptzTestServer()
+
+	w := sendPTZRequestWithAuth(srv, `<tptz:RelativeMove>
+		<tptz:ProfileToken>main</tptz:ProfileToken>
+		<tptz:Translation>
+			<tt:Zoom x="invalid"/>
+		</tptz:Translation>
+	</tptz:RelativeMove>`)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 for malformed XML, got %d. Body: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "Fault") {
+		t.Errorf("expected SOAP Fault, got: %s", w.Body.String())
+	}
+}
+
+func TestPTZContinuousMoveMissingPanTilt(t *testing.T) {
+	srv, state := ptzTestServer()
+
+	// Velocity with only Zoom, no PanTilt
+	w := sendPTZRequestWithAuth(srv, `<tptz:ContinuousMove>
+		<tptz:ProfileToken>main</tptz:ProfileToken>
+		<tptz:Velocity>
+			<tt:Zoom x="0.5"/>
+		</tptz:Velocity>
+	</tptz:ContinuousMove>`)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d. Body: %s", w.Code, w.Body.String())
+	}
+
+	// Wait and check — Pan/Tilt should be 0 (missing element), Zoom > 0
+	time.Sleep(100 * time.Millisecond)
+	pos := state.GetPosition()
+	if pos.Pan != 0 || pos.Tilt != 0 {
+		t.Errorf("expected Pan/Tilt 0 for missing PanTilt, got Pan=%f Tilt=%f", pos.Pan, pos.Tilt)
+	}
+	if pos.Zoom <= 0 {
+		t.Errorf("expected Zoom > 0 from Zoom element, got %f", pos.Zoom)
+	}
+	state.Stop()
 }
