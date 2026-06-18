@@ -2,6 +2,8 @@ package ptz
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -482,5 +484,96 @@ func TestSetPresetConcurrency(t *testing.T) {
 
 	if len(s.GetPresets()) != 100 {
 		t.Errorf("expected 100 presets, got %d", len(s.GetPresets()))
+	}
+}
+
+func TestPresetPersistence(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "presets.json")
+
+	s := NewState()
+	if err := s.EnablePersistence(path); err != nil {
+		t.Fatalf("EnablePersistence: %v", err)
+	}
+
+	// Set presets
+	s.mu.Lock()
+	s.position = Position{Pan: 0.5, Tilt: -0.3, Zoom: 0.8}
+	s.mu.Unlock()
+	s.SetPreset("home", "Home Position")
+
+	s.mu.Lock()
+	s.position = Position{Pan: -0.5, Tilt: 0.3, Zoom: 0.2}
+	s.mu.Unlock()
+	s.SetPreset("wide", "Wide Angle")
+
+	// Create new state and load from file
+	s2 := NewState()
+	if err := s2.EnablePersistence(path); err != nil {
+		t.Fatalf("EnablePersistence (2): %v", err)
+	}
+
+	presets := s2.GetPresets()
+	if len(presets) != 2 {
+		t.Fatalf("expected 2 presets, got %d", len(presets))
+	}
+
+	homePos, err := s2.GetPresetPosition("home")
+	if err != nil {
+		t.Fatalf("GetPresetPosition(home): %v", err)
+	}
+	if homePos.Pan != 0.5 || homePos.Tilt != -0.3 || homePos.Zoom != 0.8 {
+		t.Errorf("home position mismatch: got %+v", homePos)
+	}
+
+	widePos, err := s2.GetPresetPosition("wide")
+	if err != nil {
+		t.Fatalf("GetPresetPosition(wide): %v", err)
+	}
+	if widePos.Pan != -0.5 || widePos.Tilt != 0.3 || widePos.Zoom != 0.2 {
+		t.Errorf("wide position mismatch: got %+v", widePos)
+	}
+
+	// Test remove also persists
+	s2.RemovePreset("home")
+	presets = s2.GetPresets()
+	if len(presets) != 1 {
+		t.Errorf("expected 1 preset after removal, got %d", len(presets))
+	}
+
+	// Load again to verify removal persisted
+	s3 := NewState()
+	if err := s3.EnablePersistence(path); err != nil {
+		t.Fatalf("EnablePersistence (3): %v", err)
+	}
+	presets = s3.GetPresets()
+	if len(presets) != 1 {
+		t.Errorf("expected 1 preset on re-load, got %d", len(presets))
+	}
+
+	// Verify file content on disk
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if len(data) == 0 {
+		t.Error("persistence file is empty")
+	}
+}
+
+func TestPresetPersistenceNoFile(t *testing.T) {
+	// EnablePersistence with non-existent file should not error
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nonexistent.json")
+
+	s := NewState()
+	if err := s.EnablePersistence(path); err != nil {
+		t.Errorf("expected no error for missing file, got %v", err)
+	}
+
+	// Setting a preset should create the file
+	s.SetPreset("test", "Test")
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		t.Error("expected persistence file to be created after SetPreset")
 	}
 }

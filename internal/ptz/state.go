@@ -5,9 +5,21 @@ package ptz
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"math"
+	"os"
 	"sync"
 	"time"
+)
+
+// Constants for movement timing, easing, and threshold values.
+const (
+	moveTickInterval   = 50 * time.Millisecond
+	velocityStepSize   = 0.01
+	absoluteMoveSteps  = 20
+	absoluteEaseFactor = 0.15
+	snapThreshold      = 0.001
 )
 
 // Position represents current PTZ coordinates.
@@ -41,6 +53,7 @@ type State struct {
 	cancel         context.CancelFunc
 	onPosChange    func(pos Position)
 	onPresetChange func()
+	persistPath    string // non-empty enables file persistence
 }
 
 // NewState creates a new PTZ state initialized at center position.
@@ -93,7 +106,7 @@ func (s *State) ContinuousMove(vel Velocity) {
 
 // runMovement updates position at 50ms intervals until context is cancelled.
 func (s *State) runMovement(ctx context.Context) {
-	ticker := time.NewTicker(50 * time.Millisecond)
+	ticker := time.NewTicker(moveTickInterval)
 	defer ticker.Stop()
 
 	for {
@@ -102,9 +115,9 @@ func (s *State) runMovement(ctx context.Context) {
 			return
 		case <-ticker.C:
 			s.mu.Lock()
-			s.position.Pan = clampf(s.position.Pan+s.velocity.Pan*0.01, -1, 1)
-			s.position.Tilt = clampf(s.position.Tilt+s.velocity.Tilt*0.01, -1, 1)
-			s.position.Zoom = clampf(s.position.Zoom+s.velocity.Zoom*0.01, 0, 1)
+			s.position.Pan = clampf(s.position.Pan+s.velocity.Pan*velocityStepSize, -1, 1)
+			s.position.Tilt = clampf(s.position.Tilt+s.velocity.Tilt*velocityStepSize, -1, 1)
+			s.position.Zoom = clampf(s.position.Zoom+s.velocity.Zoom*velocityStepSize, 0, 1)
 
 			// Stop if we've hit a boundary and velocity would push further
 			stopped := (s.velocity.Pan != 0 && s.position.Pan == clampf(s.velocity.Pan, -1, 1)) ||
@@ -146,31 +159,27 @@ func (s *State) AbsoluteMove(pos Position) {
 
 // runAbsoluteMove animates from start to target with exponential easing.
 func (s *State) runAbsoluteMove(ctx context.Context, start, target Position) {
-	const stepDuration = 50 * time.Millisecond
-	const totalSteps = 20 // ~1 second total
-	const easeFactor = 0.15
-
-	ticker := time.NewTicker(stepDuration)
+	ticker := time.NewTicker(moveTickInterval)
 	defer ticker.Stop()
 
-	for i := 0; i < totalSteps; i++ {
+	for i := 0; i < absoluteMoveSteps; i++ {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			s.mu.Lock()
-			s.position.Pan += (target.Pan - s.position.Pan) * easeFactor
-			s.position.Tilt += (target.Tilt - s.position.Tilt) * easeFactor
-			s.position.Zoom += (target.Zoom - s.position.Zoom) * easeFactor
+			s.position.Pan += (target.Pan - s.position.Pan) * absoluteEaseFactor
+			s.position.Tilt += (target.Tilt - s.position.Tilt) * absoluteEaseFactor
+			s.position.Zoom += (target.Zoom - s.position.Zoom) * absoluteEaseFactor
 
 			// Snap to target when close enough
-			if math.Abs(s.position.Pan-target.Pan) < 0.001 {
+			if math.Abs(s.position.Pan-target.Pan) < snapThreshold {
 				s.position.Pan = target.Pan
 			}
-			if math.Abs(s.position.Tilt-target.Tilt) < 0.001 {
+			if math.Abs(s.position.Tilt-target.Tilt) < snapThreshold {
 				s.position.Tilt = target.Tilt
 			}
-			if math.Abs(s.position.Zoom-target.Zoom) < 0.001 {
+			if math.Abs(s.position.Zoom-target.Zoom) < snapThreshold {
 				s.position.Zoom = target.Zoom
 			}
 
@@ -257,7 +266,7 @@ func (s *State) GetStatus() string {
 	return "IDLE"
 }
 
-// SetPreset stores current position as a named preset.
+// SetPreset stores current position as a named preset and persists if enabled.
 func (s *State) SetPreset(token string, presetName string) error {
 	s.mu.Lock()
 	preset := Preset{
@@ -270,7 +279,19 @@ func (s *State) SetPreset(token string, presetName string) error {
 	}
 	s.presets[token] = preset
 	cb := s.onPresetChange
+	path := s.persistPath
+	var saveSnapshot []Preset
+	if path != "" {
+		saveSnapshot = make([]Preset, 0, len(s.presets))
+		for _, p := range s.presets {
+			saveSnapshot = append(saveSnapshot, p)
+		}
+	}
 	s.mu.Unlock()
+
+	if path != "" {
+		savePresetsToFile(path, saveSnapshot)
+	}
 
 	if cb != nil {
 		cb()
@@ -278,7 +299,7 @@ func (s *State) SetPreset(token string, presetName string) error {
 	return nil
 }
 
-// RenamePreset changes a preset's name without modifying its position.
+// RenamePreset changes a preset name without modifying its position and persists.
 func (s *State) RenamePreset(token string, newName string) error {
 	s.mu.Lock()
 	preset, ok := s.presets[token]
@@ -289,7 +310,19 @@ func (s *State) RenamePreset(token string, newName string) error {
 	preset.Name = newName
 	s.presets[token] = preset
 	cb := s.onPresetChange
+	path := s.persistPath
+	var saveSnapshot []Preset
+	if path != "" {
+		saveSnapshot = make([]Preset, 0, len(s.presets))
+		for _, p := range s.presets {
+			saveSnapshot = append(saveSnapshot, p)
+		}
+	}
 	s.mu.Unlock()
+
+	if path != "" {
+		savePresetsToFile(path, saveSnapshot)
+	}
 
 	if cb != nil {
 		cb()
@@ -322,7 +355,7 @@ func (s *State) GotoPreset(token string) error {
 	return nil
 }
 
-// RemovePreset deletes a named preset.
+// RemovePreset deletes a named preset and persists if enabled.
 func (s *State) RemovePreset(token string) error {
 	s.mu.Lock()
 	if _, ok := s.presets[token]; !ok {
@@ -332,7 +365,19 @@ func (s *State) RemovePreset(token string) error {
 
 	delete(s.presets, token)
 	cb := s.onPresetChange
+	path := s.persistPath
+	var saveSnapshot []Preset
+	if path != "" {
+		saveSnapshot = make([]Preset, 0, len(s.presets))
+		for _, p := range s.presets {
+			saveSnapshot = append(saveSnapshot, p)
+		}
+	}
 	s.mu.Unlock()
+
+	if path != "" {
+		savePresetsToFile(path, saveSnapshot)
+	}
 
 	if cb != nil {
 		cb()
@@ -380,4 +425,74 @@ func (s *State) SetOnPresetListChange(fn func()) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onPresetChange = fn
+}
+
+// presetFileEntry is the JSON file format for a single saved preset.
+type presetFileEntry struct {
+	Token string  `json:"token"`
+	Name  string  `json:"name"`
+	Pan   float64 `json:"pan"`
+	Tilt  float64 `json:"tilt"`
+	Zoom  float64 `json:"zoom"`
+}
+
+// EnablePersistence enables file-based preset persistence.
+// If the file exists, presets are loaded from it.
+func (s *State) EnablePersistence(path string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.persistPath = path
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("ptz: load presets: %w", err)
+	}
+
+	var entries []presetFileEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return fmt.Errorf("ptz: parse presets: %w", err)
+	}
+
+	s.presets = make(map[string]Preset, len(entries))
+	for _, e := range entries {
+		s.presets[e.Token] = Preset{
+			Token: e.Token,
+			Name:  e.Name,
+			Position: Position{
+				Pan:  e.Pan,
+				Tilt: e.Tilt,
+				Zoom: e.Zoom,
+			},
+		}
+	}
+	return nil
+}
+
+// savePresetsToFile writes presets atomically to path (JSON).
+func savePresetsToFile(path string, presets []Preset) {
+	entries := make([]presetFileEntry, 0, len(presets))
+	for _, p := range presets {
+		entries = append(entries, presetFileEntry{
+			Token: p.Token,
+			Name:  p.Name,
+			Pan:   p.Position.Pan,
+			Tilt:  p.Position.Tilt,
+			Zoom:  p.Position.Zoom,
+		})
+	}
+
+	data, err := json.Marshal(entries)
+	if err != nil {
+		return
+	}
+
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		return
+	}
+	os.Rename(tmpPath, path)
 }
