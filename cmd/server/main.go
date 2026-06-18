@@ -20,7 +20,6 @@ import (
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/metrics"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/netutil"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/onvif"
-	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/ptz"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/rtsp"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/web"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/rtmp"
@@ -219,9 +218,8 @@ func main() {
 		}
 	}
 
-	// --- Step 4: ParamManager + PTZ ---
+	// --- Step 4: ParamManager ---
 	paramManager := camera.NewParamManager(cam)
-	ptzState := ptz.NewState()
 
 	// --- Step 5: ONVIF Server ---
 	onvifServer := onvif.New(adapter)
@@ -240,7 +238,6 @@ func main() {
 	})
 	onvif.RegisterMediaHandlers(onvifServer)
 	onvif.RegisterImagingHandlers(onvifServer, paramManager)
-	onvif.RegisterPTZHandlers(onvifServer, ptzState)
 	onvif.RegisterSnapshotHandlers(onvifServer, snapshotBuffer)
 
 	var webServer *web.Server
@@ -253,9 +250,7 @@ func main() {
 			ConfigPath:        *configPath,
 			OnvifConfig:       adapter,
 			Params:            paramManager,
-			PTZ:               ptzState,
 			AUHub:             auHub,
-			Version:           version,
 			ReadHeaderTimeout: cfg.Web.ReadHeaderTimeout,
 			ReadTimeout:       cfg.Web.ReadTimeout,
 			WriteTimeout:      cfg.Web.WriteTimeout,
