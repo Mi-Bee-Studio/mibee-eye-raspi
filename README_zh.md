@@ -10,25 +10,25 @@
   <table>
     <tr>
       <td align="center"><b>🪶 15–25 MB</b><br><sub>树莓派 3B 实测内存占用</sub></td>
-      <td align="center"><b>✅ ONVIF Profile S</b><br><sub>设备 · 媒体 · PTZ · 成像</sub></td>
+      <td align="center"><b>✅ ONVIF Profile S</b><br><sub>设备 · 媒体 · 成像</sub></td>
       <td align="center"><b>🔧 零 CGO</b><br><sub>纯 Go，交叉编译无痛</sub></td>
     </tr>
   </table>
 </div>
 
 
-MiBee Eye 是一个轻量级的 Go ONVIF 相机服务，支持树莓派、香蕉派、香橙派等单板计算机，兼容所有 CSI/USB 摄像头。它提供 ONVIF 设备/媒体/PTZ/成像服务、RTSP 流媒体、RTMP 推流、WS-Discovery 支持、HLS 直播流和国际化支持，用于 NVR/VMS 集成。
+MiBee Eye 是一个轻量级的 Go ONVIF 相机服务，支持树莓派、香蕉派、香橙派等单板计算机，兼容所有 CSI/USB 摄像头。它提供 ONVIF 设备/媒体/成像服务、RTSP 流媒体、RTMP 推流、WS-Discovery 支持、HLS 直播流和国际化支持，用于 NVR/VMS 集成。
 
 ## 功能
 
-- **ONVIF 设备/媒体/PTZ/成像服务** - 完全符合 ONVIF 标准，支持 NVR 集成
+- **ONVIF 设备/媒体/成像服务** - 完全符合 ONVIF 标准，支持 NVR 集成
 - **RTSP 流媒体** - H.264 视频流，支持可配置的分辨率和码率
 - **RTMP 推流** - 推送到阿里云、Twitch、YouTube 等云服务
 - **WS-Discovery** - 网络自动发现相机
 - **HLS 直播流** - 纯 Go MPEG-TS 分段器，支持 Web 直播流（无 ffmpeg 依赖）
 - **国际化支持** - 中英文界面切换 (i18n)
 - **Web 管理界面** - 基于 token 认证的登录页面，支持 HLS 视频播放器，语言和主题切换，快照功能
-- **数字 PTZ** - 通过软件裁剪实现平移/倾斜/缩放
+
 - **相机控制** - 亮度、对比度、饱和度、锐度调节
 - **快照支持** - 通过 HTTP 端点获取 JPEG 快照
 - **低内存占用** - 约 15-30MB RAM 使用量
@@ -92,12 +92,11 @@ sudo systemctl enable --now mibee-eye
 
 - **实时预览** - 使用 **HLS 视频播放器** (hls.js) 的流畅直播预览
 - **图像控制** - 亮度、对比度、饱和度、锐度滑块；白平衡和曝光模式下拉框
-- **PTZ 控制** - 方向键持续移动、缩放按钮、预设点管理
 - **服务配置** - 查看所有配置项，编辑 ONVIF 凭据并保存重启
 - **语言切换** - 中文/English 界面语言切换
 - **主题切换** - 深色/浅色主题切换
 - **快照按钮** - 一键获取相机 JPEG 快照
-- **WebSocket** - 实时参数和 PTZ 位置更新，无需轮询
+- **WebSocket** - 实时参数更新，无需轮询
 
 通过 `http://<设备IP>:8088/` 访问，使用 **token-based 认证** 的登录页面。
 
@@ -151,14 +150,14 @@ flowchart TB
     WEBUI --> BROWSER
 ```
 
-相机采集通过 CSI 接口，支持 OV5647、IMX219、IMX708、IMX477 等模块。RTSP 服务器使用与 MediaMTX 相同的 gortsplib 库。ONVIF 服务提供完整的设备发现、媒体控制、PTZ 操作和图像参数调节。RTMP 推流支持云服务。
+相机采集通过 CSI 接口，支持 OV5647、IMX219、IMX708、IMX477 等模块。RTSP 服务器使用与 MediaMTX 相同的 gortsplib 库。ONVIF 服务提供完整的设备发现、媒体控制和图像参数调节。RTMP 推流支持云服务。
 
 ### 性能对比
 
 | 指标 | MiBee Eye | MediaMTX | 改善 |
 |--------|---------|----------|-------------|
 | 内存占用 | **15–25 MB** | ~45 MB | 降低 45–67% |
-| ONVIF 服务端 | ✅ **Profile S**（设备/媒体/PTZ/成像） | ❌ 不支持 | — |
+| ONVIF 服务端 | ✅ **Profile S**（设备/媒体/成像） | ❌ 不支持 | — |
 | CGO 依赖 | **零 CGO** | 需要 CGO | 交叉编译无痛 |
 | 相机控制 | ✅ 亮度、对比度、白平衡等 | ❌ 无 | — |
 | RTMP 推流 | ✅ 内置 | ❌ 无 | — |
@@ -166,7 +165,7 @@ flowchart TB
 |--------|---------|----------|-------------|
 | 内存占用 | **15–25 MB** | ~45 MB | 降低 45–67% |
 | 内存占用 (HLS) | **30–40 MB** | ~45 MB | 降低 33–55% |
-| ONVIF 服务端 | ✅ **Profile S**（设备/媒体/PTZ/成像） | ❌ 不支持 | — |
+| ONVIF 服务端 | ✅ **Profile S**（设备/媒体/成像） | ❌ 不支持 | — |
 || CGO 依赖 | **零 CGO** | 需要 CGO | 交叉编译无痛 |
 | 相机控制 | ✅ 亮度、对比度、白平衡等 | ❌ 无 | — |
 || 相机控制 | ✅ 亮度、对比度、白平衡等 | ❌ 无 | — |
@@ -176,7 +175,7 @@ flowchart TB
 
 | 组件 | 库 | 选择理由 |
 |-----------|---------|-----------|
-| ONVIF 服务端 | 手写 SOAP | 纯 Go，完整的 Device/Media/PTZ/Imaging |
+| ONVIF 服务端 | 手写 SOAP | 纯 Go，完整的 Device/Media/Imaging |
 | RTSP 服务器 | `bluenviron/gortsplib/v5` | MediaMTX 同款库，兼容性有保证 |
 | RTMP 推流 | 纯 Go 实现 | Go 原生，资源占用低，维护活跃 |
 | HLS 直播桥 | 纯 Go MPEG-TS 分段器 | 无外部依赖，轻量级 |
