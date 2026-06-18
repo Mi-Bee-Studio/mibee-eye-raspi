@@ -12,7 +12,6 @@ This guide covers deployment of the MiBee Eye ONVIF camera server for single-boa
 - 905MB RAM minimum
 - User account with sudo NOPASSWD privileges
 - Network connectivity to target RPi
-- FFmpeg installed on device (for HLS streaming and snapshot)
 
 ### Workstation Requirements
 - Go 1.26+ installed
@@ -53,11 +52,6 @@ scp /tmp/mtxrpicam_64/mtxrpicam <your-rpi-user>@<your-rpi-ip>:~/mibee-eye/deploy
 
 **Why bundled libcamera?** Debian 13 ships libcamera 0.7.0 (`libcamera.so.0.7`), but mtxrpicam is compiled against a specific libcamera version (`libcamera.so.9.9`). The bundled library avoids this mismatch. If you see `encoder_create(): unable to activate output stream`, ensure the bundled libs are in `deploy/bin/` and `LD_LIBRARY_PATH` is set correctly.
 
-**Additional device dependency:**
-```bash
-# FFmpeg is required for snapshot JPEG conversion
-ssh <your-rpi-user>@<your-rpi-ip> 'sudo apt install -y ffmpeg'
-```
 
 ## Build Process
 
@@ -113,17 +107,15 @@ ssh <your-rpi-user>@<your-rpi-ip> "sudo systemctl enable mibee-eye"
 
 > **Note:** The systemd unit sets `Environment=LD_LIBRARY_PATH=/home/pi/mibee-eye/deploy/bin` so the bundled libcamera libraries are found at runtime. If you install to a different path, update this value in the service file accordingly.
 
-### 4. Automated Deployment
+### 4. Deploy Binary (WiFi-safe procedure)
 
 ```bash
-# Run automated deployment
-./deploy/deploy.sh
+# Stop service before upload to prevent WiFi drops
+ssh <your-rpi-user>@<your-rpi-ip> 'sudo systemctl stop mibee-eye'
 
-# The script automatically:
-# 1. Stops and disables MediaMTX
-2. Deploys mibee-eye binary and config
-3. Installs systemd service
-# 4. Enables the service
+# Upload and restart (gzip for stability)
+gzip -c build/mibee-eye | ssh <your-rpi-user>@<your-rpi-ip> 'gunzip > ~/mibee-eye/mibee-eye && chmod +x ~/mibee-eye/mibee-eye'
+ssh <your-rpi-user>@<your-rpi-ip> 'sudo systemctl start mibee-eye'
 ```
 
 ## Configuration
@@ -372,13 +364,12 @@ onvif:
 # Pull latest changes
 git pull origin main
 
-# Rebuild and redeploy
+# Rebuild
 make build
-make deploy
 
-# Restart service
-make service-restart
-```
+# Deploy (use manual procedure above - make deploy is broken, see Known Deployment Issues)
+gzip -c build/mibee-eye | ssh <your-rpi-user>@<your-rpi-ip> 'gunzip > ~/mibee-eye/mibee-eye && chmod +x ~/mibee-eye/mibee-eye'
+ssh <your-rpi-user>@<your-rpi-ip> 'sudo systemctl restart mibee-eye'
 
 ### Backup Configuration
 
@@ -395,3 +386,23 @@ For additional support:
 Check service logs with `journalctl -u mibee-eye -f`
 - Validate configuration with `--validate-config` flag
 Test with debug logging: `MIBEE_EYE_LOGGING_LEVEL=debug`
+## Known Deployment Issues
+
+These issues are acknowledged in AGENTS.md and affect deployment:
+
+1. **`make deploy` is broken** — The Makefile target tries to `scp configs/config.yaml`, but only `configs/config.example.yaml` exists in the repo. Use the manual deploy procedure above instead.
+
+2. **WiFi drops under load** — RPi 3B WiFi is unstable under sustained transfer. Always stop the service before uploading a new binary, then restart:
+   ```bash
+   ssh user@host 'sudo systemctl stop mibee-eye'
+   gzip -c build/mibee-eye | ssh user@host 'gunzip > ~/mibee-eye/mibee-eye && chmod +x ~/mibee-eye/mibee-eye'
+   ssh user@host 'sudo systemctl start mibee-eye'
+   ```
+
+3. **`mtxrpicam` binary path requirement** — The binary must exist at `~/mibee-eye/deploy/bin/mtxrpicam` along with bundled libcamera libraries (`libcamera.so.9.9`, `libcamera-base.so.9.9`, IPA modules). The systemd unit sets `LD_LIBRARY_PATH=/home/mickey/mibee-eye/deploy/bin`. Without this, camera capture fails silently.
+
+4. **Camera exclusivity** — Only one process can hold `/dev/video0`. The systemd unit has `Conflicts=mediamtx.service` to prevent conflicts. If MediaMTX is installed, disable it: `sudo systemctl disable --now mediamtx`.
+
+5. **Port 9100 conflict** — Metrics defaults to port 9100, which is also used by Prometheus `node_exporter`. Either:
+   - Set `metrics.enabled: false` in `config.yaml`, OR
+   - Change `metrics.port` to a free port (e.g., 9101)

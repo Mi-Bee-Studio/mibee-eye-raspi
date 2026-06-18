@@ -13,7 +13,6 @@
 - 最少 905MB 内存
 - 具有 sudo NOPASSWD 权限的用户账户
 - 连接到目标 RPi 的网络访问
-- FFmpeg 安装在设备上（用于 HLS 流媒体和快照）
 
 ### 工作站要求
 - 已安装 Go 1.26+
@@ -54,11 +53,6 @@ scp /tmp/mtxrpicam_64/mtxrpicam <your-rpi-user>@<your-rpi-ip>:~/mibee-eye/deploy
 
 **为什么捆绑 libcamera？** Debian 13 附带的 libcamera 0.7.0（`libcamera.so.0.7`），但 mtxrpicam 编译时链接的是特定版本的 libcamera（`libcamera.so.9.9`）。捆绑的库避免了这种版本不匹配。如果遇到 `encoder_create(): unable to activate output stream` 错误，请确保捆绑的库文件在 `deploy/bin/` 中，并且 `LD_LIBRARY_PATH` 设置正确。
 
-**额外的设备依赖：**
-```bash
-# FFmpeg 用于快照 JPEG 转换
-ssh <your-rpi-user>@<your-rpi-ip> 'sudo apt install -y ffmpeg'
-```
 ## 构建过程
 
 ### 从工作站交叉编译
@@ -113,17 +107,15 @@ ssh <your-rpi-user>@<your-rpi-ip> "sudo systemctl enable mibee-eye"
 
 > **注意：** systemd 服务单元中设置了 `Environment=LD_LIBRARY_PATH=/home/pi/mibee-eye/deploy/bin`，以便运行时找到捆绑的 libcamera 库。如果您安装到不同路径，请相应更新服务文件中的此值。
 
-### 4. 自动化部署
+### 4. 部署二进制文件（WiFi 安全流程）
 
 ```bash
-# 运行自动化部署脚本
-./deploy/deploy.sh
+# 上传前停止服务以防止 WiFi 掉线
+ssh <your-rpi-user>@<your-rpi-ip> 'sudo systemctl stop mibee-eye'
 
-# 脚本会自动执行：
-# 1. 停止并禁用 MediaMTX
-# 2. 部署 mibee-eye 二进制文件和配置
-# 3. 安装 systemd 服务
-# 4. 启用服务
+# 上传并重启（gzip 保证稳定性）
+gzip -c build/mibee-eye | ssh <your-rpi-user>@<your-rpi-ip> 'gunzip > ~/mibee-eye/mibee-eye && chmod +x ~/mibee-eye/mibee-eye'
+ssh <your-rpi-user>@<your-rpi-ip> 'sudo systemctl start mibee-eye'
 ```
 
 ## 配置
@@ -375,12 +367,12 @@ onvif:
 git pull origin main
 
 # 重新构建和重新部署
+# 重新构建
 make build
-make deploy
 
-# 重启服务
-make service-restart
-```
+# 部署（使用上面的手动流程 - make deploy 已损坏，参见已知部署问题）
+gzip -c build/mibee-eye | ssh <your-rpi-user>@<your-rpi-ip> 'gunzip > ~/mibee-eye/mibee-eye && chmod +x ~/mibee-eye/mibee-eye'
+ssh <your-rpi-user>@<your-rpi-ip> 'sudo systemctl restart mibee-eye'
 
 ### 备份配置
 
@@ -391,6 +383,34 @@ cp config.yaml ~/backups/config.yaml.$(date +%Y%m%d).backup
 ```
 
 ## 支持
+## 已知部署问题
+
+AGENTS.md 中记录了以下影响部署的问题：
+
+1. **`make deploy` 已损坏** — Makefile 目标尝试 `scp configs/config.yaml`，但仓库中只有 `configs/config.example.yaml`。请使用上面的手动部署流程。
+
+2. **WiFi 在负载下掉线** — RPi 3B WiFi 在持续传输时不稳定。上传新二进制文件前务必停止服务，然后重启：
+   ```bash
+   ssh user@host 'sudo systemctl stop mibee-eye'
+   gzip -c build/mibee-eye | ssh user@host 'gunzip > ~/mibee-eye/mibee-eye && chmod +x ~/mibee-eye/mibee-eye'
+   ssh user@host 'sudo systemctl start mibee-eye'
+   ```
+
+3. **`mtxrpicam` 二进制文件路径要求** — 二进制文件必须存在于 `~/mibee-eye/deploy/bin/mtxrpicam`，并附带捆绑的 libcamera 库文件（`libcamera.so.9.9`、`libcamera-base.so.9.9`、IPA 模块）。systemd 单元设置了 `LD_LIBRARY_PATH=/home/mickey/mibee-eye/deploy/bin`。如果没有此设置，摄像头捕获会静默失败。
+
+4. **摄像头独占性** — 只有一个进程可以持有 `/dev/video0`。systemd 单元中有 `Conflicts=mediamtx.service` 以防止冲突。如果已安装 MediaMTX，请禁用它：`sudo systemctl disable --now mediamtx`。
+
+5. **端口 9100 冲突** — 指标默认使用端口 9100，这也是 Prometheus `node_exporter` 使用的端口。请执行以下操作之一：
+   - 在 `config.yaml` 中设置 `metrics.enabled: false`，或
+   - 将 `metrics.port` 更改为空闲端口（例如 9101）
+
+## 支持
+
+如需额外支持：
+- 查看故障排除文档
+- 使用 `journalctl -u mibee-eye -f` 检查服务日志
+- 使用 `--validate-config` 标志验证配置
+- 使用调试日志进行测试：`MIBEE_EYE_LOGGING_LEVEL=debug`
 
 如需额外支持：
 - 查看故障排除文档
