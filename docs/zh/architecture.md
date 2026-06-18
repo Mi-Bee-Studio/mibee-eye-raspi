@@ -25,14 +25,6 @@ MiBee Eye 是一个轻量级的 Go 应用程序，为树莓派、香蕉派、香
 │  │ - WS-发现      │  │ - 获取快照    │  │ - 预设位置     ││
 │  │                │  │                │  │                ││
 │  └─────────────────┘  └─────────────────┘  └─────────────────┘│
-│  ┌─────────────────┐  ┌─────────────────┐                     │
-│  │  成像服务      │  │ WS-发现        │                     │
-│  │                │  │                │                     │
-│  │ - 亮度        │  │ - UDP 探测     │                     │
-│  │ - 对比度      │  │ - HTTP 探测    │                     │
-│  │ - 饱和度      │  │                │                     │
-│  │ - 曝光        │  │                │                     │
-│  └─────────────────┘  └─────────────────┘                     │
 └───────────────────────┬───────────────────────────────────────┘
                        │
 ┌───────────────────────▼───────────────────────────────────────┐
@@ -51,9 +43,13 @@ MiBee Eye 是一个轻量级的 Go 应用程序，为树莓派、香蕉派、香
 ┌─────────────────────────────────────────────────────────────┐
 │                HLS 服务器                                │
 │              (internal/hls/server.go)                     │
-│     RTSP → HLS 转换用于浏览器播放                          │
+│     纯 Go MPEG-TS 分段器（内存分段）
 └─────────────────────────────────────────────────────────────┘
 
+│
+│                 指标端点
+│              (internal/metrics/metrics.go)
+│     Prometheus 指标用于操作可见性
 ┌─────────────────────────────────────────────────────────────┐
 │                Web UI 服务器                              │
 │              (internal/web/web.go)                        │
@@ -81,14 +77,19 @@ ONVIF 服务器实现单端点 SOAP 框架，处理多个 ONVIF 服务：
 
 ### 相机子系统 (`internal/camera/camera.go`)
 
-相机捕获使用 MediaMTX 经过验证的 `mtxrpicam` C 二进制文件（来自
+相机捕获支持两种模式（通过 `camera.mode` 配置）：
+
+**mtxrpicam 模式（默认）**: 使用 MediaMTX 经过验证的 `mtxrpicam` C 二进制文件（来自
 [mediamtx-rpicamera](https://github.com/bluenviron/mediamtx-rpicamera)）通过子进程运行。它捆绑了自带的 `libcamera.so.9.9`，以避免与系统 libcamera 版本冲突。
 
-- **管道协议**: `PIPE_CONF_FD` 用于配置，`PIPE_VIDEO_FD` 用于 H.264 NALU 帧
+**rtsp 模式**: 消费外部 RTSP URL，用于在没有相机硬件的情况下进行测试（`internal/camera/` 中的 RTSPSource 实现）。
+
+对于 mtxrpicam 模式：
+
+- **管道协议**: 4 字节小端帧协议（配置和视频帧）
 - **子进程隔离**: 使用 `Setpgid=true` 生成，实现信号隔离
 - **参数控制**: 通过配置管道实时更新相机参数
 - **错误处理**: 进程监控和优雅关闭
-
 `deploy/bin/` 中需要的文件：
 `mtxrpicam`、`libcamera.so.9.9`、`libcamera-base.so.9.9`、
 `ipa_module/ipa_rpi_vc4.so`、`ipa_module/ipa_rpi_vc4.so.sign`、
@@ -110,7 +111,7 @@ AUHub 提供帧分发到多个消费者，采用扇出模式：
 - RTSP 服务器用于视频流媒体
 - 快照处理器用于 JPEG 捕获
 - RTMP 推送用于云服务
-- **HLS 服务器（通过 RTSP）**: ffmpeg 子进程将 RTSP 转换为 HLS 段
+- **HLS 服务器**: 纯 Go MPEG-TS 分段器，内存分段（无子进程）
 ### RTSP 服务器 (`internal/rtsp/server.go`)
 
 RTSP 服务器基于 `gortsplib v5` 构建，用于 H.264 流媒体：
@@ -132,31 +133,22 @@ RTSP 服务器基于 `gortsplib v5` 构建，用于 H.264 流媒体：
 
 
 ### HLS 服务器 (`internal/hls/server.go`)
-- **移动模式**:
-  - 连续：基于速度的移动，50ms 更新
-  - 绝对：指数缓动到目标位置
-  - 相对：立即增量定位
-- **预设管理**: 命名位置存储和调用
-- **状态管理**: 线程安全的位置跟踪和状态报告
 
+HLS 服务器通过纯 Go MPEG-TS 分段器提供实时流媒体：
 
-
-
-HLS 服务器使用 ffmpeg 子进程将 RTSP 流转换为 HLS 段：
-HLS 服务器使用 ffmpeg 子进程将 RTSP 流转换为 HLS 段：
-
-- **子进程管理**: ffmpeg 进程自动重启，崩溃后恢复
+- **纯 Go 实现**: `internal/hls/muxts.go` 中的 MPEG-TS 分段器（无子进程）
+- **内存分段**: 分段保持在内存中，不在磁盘上写入 .ts 文件
 - **HTTP 服务**: 通过 HTTP 端点提供 .m3u8 播放列表和 .ts 段
-- **配置**: 可配置段持续时间和播放列表大小
-- **集成**: 从 RTSP 服务器输出读取 RTSP URL
-- **优化**: 为网页播放生成具有适当 GOP 结构的 H.264 段
+- **配置**: 可配置的 `segment_duration`（默认 2s）和播放列表大小
+- **集成**: 直接从 AUHub 消费 H.264 帧
+- **低开销**: 最小内存使用（内存分段缓冲区，几 MB）
 
 主要功能：
-- HLS 媒体播放列表生成，带序列号
-- 适应流式传输的分段视频文件
+- 带有序列号的 HLS 媒体播放列表生成
+- 纯 Go MPEG-TS 分段器，无外部依赖
 - 基于 HTTP 的浏览器交付
 - 支持 hls.js 播放器集成
-- 低延迟流式传输，可配置参数
+- 可配置参数的亚秒延迟流媒体
 
 ### Web UI 服务器 (`internal/web/web.go`)
 
@@ -165,7 +157,7 @@ Web UI 服务器提供基于浏览器的相机管理界面：
 - **身份验证**: 基于 token 的身份验证，登录/登出功能
 - **i18n 支持**: 中英文语言切换
 - **主题**: 明暗主题偏好
-- **视频播放器**: 使用 hls.js 库的 HLS 播放
+- **视频播放器**: MSE（媒体源扩展）用于亚秒延迟预览，加上 HLS（hls.js）用于兼容性
 - **相机控制**: 实时亮度、对比度、饱和度、锐度调整
 
 - **快照**: JPEG 捕获和下载功能
@@ -181,7 +173,7 @@ OV5647 相机 → mtxrpicam → H.264 NALU → 解析器 → AUHub → 订阅者
                              ┌─────────────┼─────────────┐
                              │             │             │
                        RTSP 服务器     快照处理器      RTMP 推送
-                       (gortsplib v5)  (FFmpeg → JPEG)  (回环)
+                       (rpicam-still + IDR 回退)
 ```
 
 1. **捕获**: mtxrpicam 子进程从 OV5647 CSI 相机捕获帧
@@ -189,9 +181,9 @@ OV5647 相机 → mtxrpicam → H.264 NALU → 解析器 → AUHub → 订阅者
 3. **处理**: 解析器提取 NALU 和时间戳，检测关键帧
 4. **分发**: AUHub 将访问单元分发给多个消费者
 5. **流媒体**: RTSP 服务器通过 gortsplib 向 NVR 客户端提供视频
-6. **快照**: FFmpeg 子进程按需将 H.264 关键帧转换为 JPEG
+6. **快照**: 双层策略 — 尝试 rpicam-still JPEG 捕获（3 秒超时），回退到原始 H.264 IDR 帧
 7. **控制**: ONVIF 服务提供相机控制和发现功能
-8. **HLS**: ffmpeg 子进程消耗 RTSP 流，生成 HLS 段用于浏览器播放
+8. **HLS**: 纯 Go MPEG-TS 分段器生成内存分段用于浏览器播放
 
 ## 资源使用
 
@@ -201,8 +193,7 @@ OV5647 相机 → mtxrpicam → H.264 NALU → 解析器 → AUHub → 订阅者
 ||---------|----------|------|
 ||| MiBee Eye | ~9MB | Go 主进程（ONVIF + RTSP + 管道） |
 || mtxrpicam | ~10MB | 相机捕获子进程 |
-|| **ffmpeg (HLS)** | ~15MB | HLS 段生成器（仅在 HLS 激活时存在） |
-|| **总计** | **~35MB** | |
+- **总计** | **~19MB** | （HLS 添加最小内存 — 内存分段缓冲区，几 MB）
 
 - **CPU**: MiBee Eye ~2%，mtxrpicam ~12%，720p@15fps
 - **网络**: 720p@15fps H.264 流 ~2Mbps
@@ -213,9 +204,6 @@ OV5647 相机 → mtxrpicam → H.264 NALU → 解析器 → AUHub → 订阅者
 - **pion/rtp**: H.264 流媒体的 RTP 数据包处理
 - **yaml.v3**: 配置文件解析
 - **onvif-go**: ONVIF 服务器实现（通过研究间接依赖）
-- **FFmpeg**: 快照端点按需 JPEG 转换（设备上需安装）
-- **ffmpeg**: HLS 实时流媒体 RTSP→HLS 转换（已用于快照；现在也用于 HLS）
-- **FFmpeg**: 快照端点按需 JPEG 转换（设备上需安装）
 
 ## 部署架构
 
@@ -236,11 +224,9 @@ OV5647 相机 → mtxrpicam → H.264 NALU → 解析器 → AUHub → 订阅者
 || libcamera-base.so.9.9 | 共享库 (捆绑) | 140KB | libcamera 基础支持 |
 || ipa_module/ipa_rpi_vc4.so | IPA 模块 | 690KB | RPi VC4 图像处理 |
 || libpisp/backend_default_config.json | 配置 | 11KB | PiSP 后端配置 |
-|| **ffmpeg (HLS)** | 二进制文件 | 可执行 | RTSP→HLS 转换用于浏览器播放 |
-|| **HLS 段** | 文件 | 变量 | HTTP 可访问的 .m3u8 和 .ts 文件 |
 这些依赖从 mediamtx-rpicamera 发布版捆绑，不依赖系统安装的 libcamera。
 这避免了 Debian 的 libcamera (0.7.0) 与 mtxrpicam 编译版本之间的版本冲突。
 
-- **HLS**: ffmpeg 将 RTSP 流转换为 HLS 段用于浏览器播放（Web UI 使用 hls.js）
+- **HLS**: 纯 Go MPEG-TS 分段器生成内存分段用于浏览器播放（Web UI 使用 hls.js，磁盘上无 .ts 文件）
 
 此架构完全替代 MediaMTX，以提供 ONVIF 合规性，同时保持经过验证的相机捕获和 RTSP 流媒体组件。

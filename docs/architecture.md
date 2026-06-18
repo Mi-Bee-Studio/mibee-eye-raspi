@@ -25,14 +25,6 @@ MiBee Eye is a lightweight Go application providing ONVIF-compliant camera servi
 │  │ - WS-Discovery  │  │ - Get Snapshot │  │ - Saturation    │
 │  │                 │  │                 │  │ - Sharpness     │
 │  └─────────────────┘  └─────────────────┘  └─────────────────┘│
-│  ┌─────────────────┐  ┌─────────────────┐                     │
-│  │ Imaging Service │  │ WS-Discovery   │                     │
-│  │                 │  │                │                     │
-│  │ - Brightness    │  │ - UDP Probe    │                     │
-│  │ - Contrast      │  │ - HTTP Probe   │                     │
-│  │ - Saturation    │  │                │                     │
-│  │ - Exposure      │  │                │                     │
-│  └─────────────────┘  └─────────────────┘                     │
 └───────────────────────┬───────────────────────────────────────┘
                        │
 ┌───────────────────────▼───────────────────────────────────────┐
@@ -51,9 +43,13 @@ MiBee Eye is a lightweight Go application providing ONVIF-compliant camera servi
 ┌─────────────────────────────────────────────────────────────┐
 │                 HLS Server                                │
 │              (internal/hls/server.go)                     │
-│     RTSP → HLS conversion for browser playback              │
+│     Pure Go MPEG-TS segmenter (in-memory segments)
 └─────────────────────────────────────────────────────────────┘
 
+│
+│                 Metrics Endpoint
+│              (internal/metrics/metrics.go)
+│     Prometheus metrics for operational visibility
 ┌─────────────────────────────────────────────────────────────┐
 │                 Web UI Server                            │
 │              (internal/web/web.go)                        │
@@ -81,14 +77,19 @@ Services implemented:
 
 ### Camera Subsystem (`internal/camera/camera.go`)
 
-Camera capture uses MediaMTX's proven `mtxrpicam` C binary (from
+Camera capture supports two modes (configurable via `camera.mode`):
+
+**mtxrpicam mode (default)**: Uses MediaMTX's proven `mtxrpicam` C binary (from
 [mediamtx-rpicamera](https://github.com/bluenviron/mediamtx-rpicamera)) via subprocess. It bundles its own `libcamera.so.9.9` to avoid version conflicts with system libcamera.
 
-- **Pipe Protocol**: `PIPE_CONF_FD` for config, `PIPE_VIDEO_FD` for H.264 NALU frames
+**rtsp mode**: Consumes an external RTSP URL for testing without camera hardware (RTSPSource implementation in `internal/camera/`).
+
+For mtxrpicam mode:
+
+- **Pipe Protocol**: 4-byte LE framed protocol (config and video frames)
 - **Subprocess Isolation**: Spawned with `Setpgid=true` for signal isolation
 - **Parameter Control**: Real-time camera parameter updates via config pipe
 - **Error Handling**: Process monitoring and graceful shutdown
-
 Required files in `deploy/bin/`:
 `mtxrpicam`, `libcamera.so.9.9`, `libcamera-base.so.9.9`,
 `ipa_module/ipa_rpi_vc4.so`, `ipa_module/ipa_rpi_vc4.so.sign`,
@@ -109,7 +110,7 @@ Consumers include:
 - RTSP server for video streaming
 - Snapshot handler for JPEG capture
 - RTMP push for cloud services
-- **HLS server (via RTSP)**: ffmpeg subprocess converts RTSP to HLS segments
+- **HLS server**: pure Go MPEG-TS segmenter, in-memory segments (no subprocess)
 ### RTSP Server (`internal/rtsp/server.go`)
 
 RTSP server built on `gortsplib v5` for H.264 streaming:
@@ -127,20 +128,21 @@ Key features:
 - Stream resource cleanup
 ### HLS Server (`internal/hls/server.go`)
 
-HLS Server uses ffmpeg subprocess to convert RTSP streams to HLS segments:
+HLS Server provides live streaming via pure Go MPEG-TS segmenter:
 
-- **Subprocess Management**: ffmpeg process with auto-restart on crash
+- **Pure Go Implementation**: MPEG-TS segmenter in `internal/hls/muxts.go` (no subprocess)
+- **In-Memory Segments**: Segments kept in memory, no .ts files written to disk
 - **HTTP Serving**: Serves .m3u8 playlist and .ts segments via HTTP endpoints
-- **Configuration**: Configurable segment duration and playlist size
-- **Integration**: Reads RTSP URL from RTSP server output
-- **Optimization**: H.264 segment generation with proper GOP structure for web playback
+- **Configuration**: Configurable `segment_duration` (default 2s) and playlist size
+- **Integration**: Consumes H.264 frames directly from AUHub
+- **Low Overhead**: Minimal memory usage (in-memory segment buffer, a few MB)
 
 Key features:
 - HLS media playlist generation with sequence numbers
-- Segmented video files for adaptive streaming
+- Pure Go MPEG-TS segmenter with no external dependencies
 - HTTP-based delivery to web browsers
 - Support for hls.js player integration
-- Low latency streaming with configurable parameters
+- Sub-second latency streaming with configurable parameters
 
 ### Web UI Server (`internal/web/web.go`)
 
@@ -149,7 +151,7 @@ Web UI Server provides browser-based camera management interface:
 - **Authentication**: Token-based auth with login/logout functionality
 - **i18n Support**: English/Chinese language switching
 - **Themes**: Dark/light theme preferences
-- **Video Player**: HLS playback using hls.js library
+- **Video Player**: MSE (Media Source Extensions) for sub-second latency preview, plus HLS (hls.js) for compatibility
 - **Camera Controls**: Real-time brightness, contrast, saturation, sharpness adjustment
 
 - **Snapshot**: JPEG capture with download capability
@@ -164,7 +166,7 @@ OV5647 Camera → mtxrpicam → H.264 NALUs → Parser → AUHub → Subscribers
                              ┌─────────────┼─────────────┐
                              │             │             │
                        RTSP Server     Snapshot Handler   RTMP Push
-                       (gortsplib v5)  (FFmpeg → JPEG)    (loopback)
+                       (rpicam-still + IDR fallback)
 ```
 
 1. **Capture**: mtxrpicam subprocess captures frames from OV5647 CSI camera
@@ -172,9 +174,9 @@ OV5647 Camera → mtxrpicam → H.264 NALUs → Parser → AUHub → Subscribers
 3. **Processing**: Parser extracts NALUs and timestamps, detects keyframes
 4. **Distribution**: AUHub fans out access units to multiple consumers
 5. **Streaming**: RTSP server serves video via gortsplib to NVR clients
-6. **Snapshot**: FFmpeg subprocess converts H.264 keyframes to JPEG on demand
+6. **Snapshot**: Dual-tier strategy — tries rpicam-still JPEG capture (3s timeout), falls back to raw H.264 IDR frame
 7. **Control**: ONVIF services provide camera control and discovery
-8. **HLS**: ffmpeg subprocess consumes RTSP stream, produces HLS segments for browser playback
+8. **HLS**: Pure Go MPEG-TS segmenter produces in-memory segments for browser playback
 ## Resource Usage
 
 Measured on Raspberry Pi 3B at 720p@15fps:
@@ -183,8 +185,7 @@ Measured on Raspberry Pi 3B at 720p@15fps:
 ||---------|------------|---------|
 | MiBee Eye | ~9MB | Go main process (ONVIF + RTSP + pipeline) |
 || mtxrpicam | ~10MB | Camera capture subprocess |
-|| **ffmpeg (HLS)** | ~15MB | HLS segmenter (exists only when HLS is active) |
-|| **Total** | **~35MB** | |
+- **Total** | **~19MB** | (HLS adds minimal memory — in-memory segment buffer, a few MB)
 
 - **CPU**: ~2% for MiBee Eye, ~12% for mtxrpicam at 720p@15fps
 - **Network**: ~2Mbps for 720p@15fps H.264 stream
@@ -196,8 +197,6 @@ Measured on Raspberry Pi 3B at 720p@15fps:
 - **yaml.v3**: Configuration file parsing
 - **onvif-go**: ONVIF server implementation (indirect dependency via research)
 - **mtxrpicam**: Camera capture subprocess with bundled libcamera (from bluenviron/mediamtx-rpicamera v2.6.0)
-- **FFmpeg**: On-demand JPEG conversion for snapshot endpoint (must be installed on device)
-- **ffmpeg**: HLS live streaming RTSP→HLS conversion (already required for snapshot; now used for HLS too)
 ## Deployment Architecture
 
 The system runs as a single systemd service with:
@@ -217,10 +216,8 @@ The system runs as a single systemd service with:
 || libcamera-base.so.9.9 | Shared library (bundled) | 140KB | libcamera base support |
 || ipa_module/ipa_rpi_vc4.so | IPA module | 690KB | RPi VC4 image processing |
 || libpisp/backend_default_config.json | Config | 11KB | PiSP backend configuration |
-|| **ffmpeg (HLS)** | Binary | Executable | RTSP→HLS conversion for browser playback |
-|| **HLS segments** | Files | Variable | HTTP-accessible .m3u8 and .ts files |
 These dependencies are bundled from mediamtx-rpicamera releases and do NOT depend on the system-installed libcamera. This avoids version conflicts between Debian's libcamera (0.7.0) and the version mtxrpicam was compiled against.
 
-- **HLS**: ffmpeg converts RTSP stream to HLS segments for browser playback (Web UI uses hls.js)
+- **HLS**: Pure Go MPEG-TS segmenter produces in-memory segments for browser playback (Web UI uses hls.js, no .ts files on disk)
 
 This architecture replaces MediaMTX entirely to provide ONVIF compliance while maintaining the proven camera capture and RTSP streaming components.
