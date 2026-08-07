@@ -16,10 +16,13 @@ Configuration is loaded from `configs/config.yaml` by default. Create this file 
 camera:        # Camera capture settings
 rtsp:          # RTSP streaming server
 onvif:         # ONVIF device services
-rtmp:          # RTMP push streaming
-web:           # Web UI configuration
 device:        # Device identification
 logging:       # Logging configuration
+web:           # Web UI configuration
+metrics:       # Prometheus metrics exporter
+snapshot:      # JPEG snapshot endpoint
+rtmp:          # RTMP push streaming
+hls:           # HLS live streaming
 ```
 
 ## Configuration Sections
@@ -501,7 +504,6 @@ web:
   password: ""
 
 ### Cloud Streaming Configuration
-### Cloud Streaming Configuration
 
 ```yaml
 camera:
@@ -542,7 +544,6 @@ web:
   password: ""
 
 ### Low-Bandwidth Configuration
-### Low-Bandwidth Configuration
 
 ```yaml
 camera:
@@ -582,7 +583,6 @@ web:
   username: "admin"
   password: ""
 
-## Configuration Tips
 ## Configuration Tips
 
 1. **Camera Compatibility**: Not all resolutions and settings work with all camera modules. Test your configuration with your specific camera hardware.
