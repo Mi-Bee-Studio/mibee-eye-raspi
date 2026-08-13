@@ -163,14 +163,14 @@ func TestKeepalive_Format(t *testing.T) {
 	}
 
 	// Check XML body format
-	if !strings.Contains(msg.Body, "<CmdType>Keepalive</CmdType>") {
-		t.Error("Keepalive message should contain <CmdType>Keepalive</CmdType>")
+	if !strings.Contains(msg.Body, `CmdType="Keepalive"`) {
+		t.Error("Keepalive message should contain CmdType=\"Keepalive\" attribute")
 	}
 	if !strings.Contains(msg.Body, "<Status>OK</Status>") {
 		t.Error("Keepalive message should contain <Status>OK</Status>")
 	}
-	if !strings.Contains(msg.Body, "<SN>456</SN>") {
-		t.Error("Keepalive message should contain SN")
+	if !strings.Contains(msg.Body, `SN="456"`) {
+		t.Error("Keepalive message should contain SN attribute")
 	}
 	if !strings.Contains(msg.Body, "<DeviceID>34020000012000000001</DeviceID>") {
 		t.Error("Keepalive message should contain DeviceID")
@@ -187,9 +187,7 @@ func TestKeepalive_Format(t *testing.T) {
 func TestDispatch_CatalogQuery(t *testing.T) {
 	// Build inbound MESSAGE with Catalog query
 	queryXML := `<?xml version="1.0" encoding="UTF-8"?>
-<Query>
-	<CmdType>Catalog</CmdType>
-	<SN>789</SN>
+<Query CmdType="Catalog" SN="789">
 	<DeviceID>34020000012000000001</DeviceID>
 </Query>`
 
@@ -222,10 +220,10 @@ func TestDispatch_CatalogQuery(t *testing.T) {
 	if queued.Method != "MESSAGE" {
 		t.Errorf("Expected queued method MESSAGE, got %s", queued.Method)
 	}
-	if !strings.Contains(queued.Body, "<CmdType>Catalog</CmdType>") {
+	if !strings.Contains(queued.Body, `CmdType="Catalog"`) {
 		t.Error("Queued response should be Catalog")
 	}
-	if !strings.Contains(queued.Body, "<SN>789</SN>") {
+	if !strings.Contains(queued.Body, `SN="789"`) {
 		t.Error("Queued response should echo SN")
 	}
 }
@@ -234,9 +232,7 @@ func TestDispatch_CatalogQuery(t *testing.T) {
 func TestDispatch_UnknownCmdType_NoCrash(t *testing.T) {
 	// Build inbound MESSAGE with unknown CmdType
 	queryXML := `<?xml version="1.0" encoding="UTF-8"?>
-<Query>
-	<CmdType>UnknownCommand</CmdType>
-	<SN>999</SN>
+<Query CmdType="UnknownCommand" SN="999">
 	<DeviceID>34020000012000000001</DeviceID>
 </Query>`
 
@@ -315,9 +311,7 @@ func TestDeviceInfoResponse_XMLWellFormed(t *testing.T) {
 // TestDispatch_DeviceInfoQuery tests dispatching a DeviceInfo query.
 func TestDispatch_DeviceInfoQuery(t *testing.T) {
 	queryXML := `<?xml version="1.0" encoding="UTF-8"?>
-<Query>
-	<CmdType>DeviceInfo</CmdType>
-	<SN>202</SN>
+<Query CmdType="DeviceInfo" SN="202">
 	<DeviceID>34020000012000000001</DeviceID>
 </Query>`
 
@@ -350,7 +344,7 @@ func TestDispatch_DeviceInfoQuery(t *testing.T) {
 	if queued.Method != "MESSAGE" {
 		t.Errorf("Expected queued method MESSAGE, got %s", queued.Method)
 	}
-	if !strings.Contains(queued.Body, "<CmdType>DeviceInfo</CmdType>") {
+	if !strings.Contains(queued.Body, `CmdType="DeviceInfo"`) {
 		t.Error("Queued response should be DeviceInfo")
 	}
 	if !strings.Contains(queued.Body, "<DeviceID>34020000012000000001</DeviceID>") {
@@ -361,9 +355,7 @@ func TestDispatch_DeviceInfoQuery(t *testing.T) {
 // TestDispatch_KeepaliveNotify tests handling Keepalive notify from platform.
 func TestDispatch_KeepaliveNotify(t *testing.T) {
 	notifyXML := `<?xml version="1.0" encoding="UTF-8"?>
-<Notify>
-	<CmdType>Keepalive</CmdType>
-	<SN>303</SN>
+<Notify CmdType="Keepalive" SN="303">
 	<DeviceID>34020000012000000001</DeviceID>
 	<Status>OK</Status>
 </Notify>`

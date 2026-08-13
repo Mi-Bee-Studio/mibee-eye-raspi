@@ -11,16 +11,16 @@ import (
 // Query represents a MANSCDP Query request.
 type Query struct {
 	XMLName  xml.Name `xml:"Query"`
-	CmdType  string   `xml:"CmdType"`
-	SN       string   `xml:"SN"`
+	CmdType  string   `xml:"CmdType,attr"`
+	SN       string   `xml:"SN,attr"`
 	DeviceID string   `xml:"DeviceID"`
 }
 
 // Response represents a MANSCDP Response message.
 type Response struct {
 	XMLName    xml.Name    `xml:"Response"`
-	CmdType    string      `xml:"CmdType"`
-	SN         string      `xml:"SN"`
+	CmdType    string      `xml:"CmdType,attr"`
+	SN         string      `xml:"SN,attr"`
 	DeviceID   string      `xml:"DeviceID"`
 	SumNum     *int        `xml:"SumNum,omitempty"`
 	DeviceList *DeviceList `xml:"DeviceList,omitempty"`
@@ -67,8 +67,8 @@ type DeviceItem struct {
 // Notify represents a MANSCDP Notify message.
 type Notify struct {
 	XMLName  xml.Name `xml:"Notify"`
-	CmdType  string   `xml:"CmdType"`
-	SN       string   `xml:"SN"`
+	CmdType  string   `xml:"CmdType,attr"`
+	SN       string   `xml:"SN,attr"`
 	DeviceID string   `xml:"DeviceID"`
 	Status   string   `xml:"Status,omitempty"`
 }
