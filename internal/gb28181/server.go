@@ -301,7 +301,8 @@ func (s *Server) runRegisterLifecycle(ctx context.Context) error {
 		authHeader := BuildAuthorizationHeader(auth, s.cfg.DeviceID, s.cfg.Password, requestURI, "REGISTER")
 		cseq = "2 REGISTER"
 		authMsg := BuildRegister(requestURI, from, to, callID, cseq, contact, authHeader)
-		authMsg.Via = via
+		via2 := fmt.Sprintf("SIP/2.0/UDP %s:%d;branch=z9hG4bK%016x", localIPAddr, s.cfg.LocalSIPPort, time.Now().UnixNano())
+		authMsg.Via = via2
 
 		if _, err := s.sipConn.WriteToUDP(authMsg.Serialize(), platformAddr); err != nil {
 			return fmt.Errorf("sending authenticated REGISTER: %w", err)
