@@ -111,6 +111,22 @@
             'camera.resetConfirm': 'Reset all imaging parameters to defaults?',
 
             'modal.confirmOnvifSave': 'This will restart the server. Continue?',
+
+            'modal.editGb28181': 'Edit GB28181 Settings',
+            'modal.gb28181.enabled': 'Enable GB28181',
+            'modal.gb28181.platform_sip_address': 'Platform SIP Address',
+            'modal.gb28181.platform_sip_port': 'Platform SIP Port',
+            'modal.gb28181.device_id': 'Device ID',
+            'modal.gb28181.channel_id': 'Channel ID',
+            'modal.gb28181.sip_domain': 'SIP Domain',
+            'modal.gb28181.password': 'Password',
+            'modal.gb28181.local_sip_port': 'Local SIP Port',
+            'modal.gb28181.register_interval_secs': 'Register Interval (secs)',
+            'modal.gb28181.heartbeat_interval_secs': 'Heartbeat Interval (secs)',
+            'modal.gb28181.heartbeat_timeout_count': 'Heartbeat Timeout Count',
+            'modal.confirmGb28181Save': 'This will restart the server. Continue?',
+            'modal.platformSipAddressRequired': 'Platform SIP Address is required',
+            'modal.deviceIdRequired': 'Device ID is required',
             'modal.confirmPresetDelete': 'Are you sure you want to delete this preset?',
 
         },
@@ -194,6 +210,22 @@
             'camera.resetConfirm': '确定要将所有图像参数重置为默认值吗？',
 
             'modal.confirmOnvifSave': '此操作将重启服务器，确定继续吗？',
+
+            'modal.editGb28181': '编辑 GB28181 设置',
+            'modal.gb28181.enabled': '启用 GB28181',
+            'modal.gb28181.platform_sip_address': '平台 SIP 地址',
+            'modal.gb28181.platform_sip_port': '平台 SIP 端口',
+            'modal.gb28181.device_id': '设备 ID',
+            'modal.gb28181.channel_id': '通道 ID',
+            'modal.gb28181.sip_domain': 'SIP 域',
+            'modal.gb28181.password': '密码',
+            'modal.gb28181.local_sip_port': '本地 SIP 端口',
+            'modal.gb28181.register_interval_secs': '注册间隔（秒）',
+            'modal.gb28181.heartbeat_interval_secs': '心跳间隔（秒）',
+            'modal.gb28181.heartbeat_timeout_count': '心跳超时次数',
+            'modal.confirmGb28181Save': '此操作将重启服务器，确定继续吗？',
+            'modal.platformSipAddressRequired': '平台 SIP 地址不能为空',
+            'modal.deviceIdRequired': '设备 ID 不能为空',
             'modal.confirmPresetDelete': '确定要删除此预置位吗？',
 
         }
@@ -746,7 +778,7 @@
         if (!grid) return;
         grid.innerHTML = '';
 
-        var sections = ['camera', 'rtsp', 'onvif', 'rtmp', 'device', 'logging', 'web'];
+        var sections = ['camera', 'rtsp', 'onvif', 'gb28181', 'rtmp', 'device', 'logging', 'web'];
         sections.forEach(function (sec) {
             var obj = data[sec];
             if (!obj || typeof obj !== 'object') return;
@@ -864,6 +896,156 @@
                 btnSave.disabled = true;
 
                 api('POST', '/api/config/onvif', { username: username, password: password })
+                    .then(function () {
+                        closeModal();
+                        showToast('toast.saved', null, { kind: 'success' });
+                        showRestartBanner();
+                    })
+                    .catch(function (err) {
+                        if (err.status !== 401) {
+                            errBox.textContent = err.message;
+                            errBox.removeAttribute('hidden');
+                        }
+                    })
+                    .finally(function () {
+                        btnSave.classList.remove('is-loading');
+                        btnSave.disabled = false;
+                    });
+            }).catch(function () { /* cancelled — do nothing */ });
+        });
+    }
+
+    /* ======================================================================
+       GB28181 Modal
+       ====================================================================== */
+
+    function initGb28181Modal() {
+        var overlay = $('#gb28181-overlay');
+        var btnEdit = $('#btn-edit-gb28181');
+        var btnSave = $('#btn-save-gb28181');
+        var btnCancel = $('#btn-cancel-gb28181');
+        var btnClose = $('#btn-gb28181-close');
+        var errBox = $('#gb28181-error');
+        var previousFocus = null;
+
+        var fields = [
+            { id: 'gb28181-enabled', key: 'enabled', type: 'checkbox' },
+            { id: 'gb28181-platform_sip_address', key: 'platform_sip_address', type: 'text' },
+            { id: 'gb28181-platform_sip_port', key: 'platform_sip_port', type: 'number' },
+            { id: 'gb28181-device_id', key: 'device_id', type: 'text', maxlength: 20 },
+            { id: 'gb28181-channel_id', key: 'channel_id', type: 'text', maxlength: 20 },
+            { id: 'gb28181-sip_domain', key: 'sip_domain', type: 'text' },
+            { id: 'gb28181-password', key: 'password', type: 'password' },
+            { id: 'gb28181-local_sip_port', key: 'local_sip_port', type: 'number' },
+            { id: 'gb28181-register_interval_secs', key: 'register_interval_secs', type: 'number' },
+            { id: 'gb28181-heartbeat_interval_secs', key: 'heartbeat_interval_secs', type: 'number' },
+            { id: 'gb28181-heartbeat_timeout_count', key: 'heartbeat_timeout_count', type: 'number' }
+        ];
+
+        function openModal() {
+            previousFocus = document.activeElement;
+            errBox.setAttribute('hidden', '');
+            errBox.textContent = '';
+
+            /* Populate fields from config */
+            if (state.config && state.config.gb28181) {
+                var gb = state.config.gb28181;
+                fields.forEach(function (f) {
+                    var el = document.getElementById(f.id);
+                    if (!el) return;
+                    var val = gb[f.key];
+                    if (val === null || val === undefined) val = '';
+                    if (f.type === 'checkbox') {
+                        el.checked = !!val;
+                    } else {
+                        el.value = val;
+                    }
+                });
+            }
+
+            overlay.removeAttribute('hidden');
+            setTimeout(function () {
+                var first = document.getElementById('gb28181-platform_sip_address');
+                if (first) first.focus();
+            }, 50);
+        }
+
+        function closeModal() {
+            overlay.setAttribute('hidden', '');
+            if (previousFocus && previousFocus.focus) previousFocus.focus();
+        }
+
+        /* Focus trap: cycle Tab within modal */
+        overlay.addEventListener('keydown', function (e) {
+            if (e.key !== 'Tab') return;
+            var focusable = overlay.querySelectorAll(
+                'input:not([disabled]):not([type="hidden"]), button:not([disabled]), [tabindex]:not([tabindex="-1"])'
+            );
+            if (focusable.length === 0) return;
+            var first = focusable[0];
+            var last = focusable[focusable.length - 1];
+            if (e.shiftKey) {
+                if (document.activeElement === first) {
+                    e.preventDefault();
+                    last.focus();
+                }
+            } else {
+                if (document.activeElement === last) {
+                    e.preventDefault();
+                    first.focus();
+                }
+            }
+        });
+
+        if (btnEdit) btnEdit.addEventListener('click', openModal);
+        if (btnCancel) btnCancel.addEventListener('click', closeModal);
+        if (btnClose) btnClose.addEventListener('click', closeModal);
+
+        overlay.addEventListener('click', function (e) {
+            if (e.target === overlay) closeModal();
+        });
+
+        document.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape' && !overlay.hasAttribute('hidden')) closeModal();
+        });
+
+        btnSave.addEventListener('click', function () {
+            var payload = {};
+            var hasError = false;
+
+            fields.forEach(function (f) {
+                var el = document.getElementById(f.id);
+                if (!el) return;
+                if (f.type === 'checkbox') {
+                    payload[f.key] = el.checked;
+                } else if (f.type === 'number') {
+                    payload[f.key] = parseInt(el.value, 10) || 0;
+                } else {
+                    payload[f.key] = el.value.trim();
+                }
+            });
+
+            /* Validate required fields */
+            if (!payload.platform_sip_address) {
+                errBox.textContent = t('modal.platformSipAddressRequired');
+                errBox.removeAttribute('hidden');
+                document.getElementById('gb28181-platform_sip_address').focus();
+                return;
+            }
+
+            if (!payload.device_id) {
+                errBox.textContent = t('modal.deviceIdRequired');
+                errBox.removeAttribute('hidden');
+                document.getElementById('gb28181-device_id').focus();
+                return;
+            }
+
+            var confirmMsg = t('modal.confirmGb28181Save');
+            showConfirmModal(confirmMsg).then(function () {
+                btnSave.classList.add('is-loading');
+                btnSave.disabled = true;
+
+                api('POST', '/api/config/gb28181', payload)
                     .then(function () {
                         closeModal();
                         showToast('toast.saved', null, { kind: 'success' });
@@ -1912,6 +2094,7 @@
         initTopbar();
         initSidebar();
         initOnvifModal();
+        initGb28181Modal();
         /* Bind reset defaults button */
         var resetBtn = $('#btn-reset-imaging');
         if (resetBtn) resetBtn.addEventListener('click', resetImagingDefaults);

@@ -250,6 +250,7 @@ func main() {
 			Password:          cfg.Web.Password,
 			ConfigPath:        *configPath,
 			OnvifConfig:       adapter,
+			GB28181Config:     &cfg.GB28181,
 			Params:            paramManager,
 			AUHub:             auHub,
 			ReadHeaderTimeout: cfg.Web.ReadHeaderTimeout,

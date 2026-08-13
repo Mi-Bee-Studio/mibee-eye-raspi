@@ -74,6 +74,19 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 			"username": s.username,
 			"password": maskPassword(s.password),
 		},
+		"gb28181": map[string]interface{}{
+			"enabled":                 s.cfg.GB28181Config.Enabled,
+			"platform_sip_address":    s.cfg.GB28181Config.PlatformSIPAddress,
+			"platform_sip_port":       s.cfg.GB28181Config.PlatformSIPPort,
+			"device_id":               s.cfg.GB28181Config.DeviceID,
+			"channel_id":              s.cfg.GB28181Config.ChannelID,
+			"sip_domain":              s.cfg.GB28181Config.SIPDomain,
+			"password":                maskPassword(s.cfg.GB28181Config.Password),
+			"local_sip_port":          s.cfg.GB28181Config.LocalSIPPort,
+			"register_interval_secs":  s.cfg.GB28181Config.RegisterIntervalSecs,
+			"heartbeat_interval_secs": s.cfg.GB28181Config.HeartbeatIntervalSecs,
+			"heartbeat_timeout_count": s.cfg.GB28181Config.HeartbeatTimeoutCount,
+		},
 	}
 
 	writeJSON(w, http.StatusOK, config)
@@ -161,6 +174,118 @@ func (s *Server) handlePostConfigOnvif(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.logger.Printf("web: ONVIF config updated, restarting in 500ms")
+
+	// Schedule restart after response is sent.
+	go func() {
+		<-time.After(500 * time.Millisecond)
+		_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
+	}()
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"ok":               true,
+		"restart_required": true,
+	})
+}
+
+// handlePostConfigGb28181 updates GB28181 settings and triggers restart.
+func (s *Server) handlePostConfigGb28181(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.ConfigPath == "" {
+		writeError(w, http.StatusNotImplemented, "config path not configured")
+		return
+	}
+
+	var req struct {
+		Enabled               bool   `json:"enabled"`
+		PlatformSIPAddress    string `json:"platform_sip_address"`
+		PlatformSIPPort       int    `json:"platform_sip_port"`
+		DeviceID              string `json:"device_id"`
+		ChannelID             string `json:"channel_id"`
+		SIPDomain             string `json:"sip_domain"`
+		Password              string `json:"password"`
+		LocalSIPPort          int    `json:"local_sip_port"`
+		RegisterIntervalSecs  int    `json:"register_interval_secs"`
+		HeartbeatIntervalSecs int    `json:"heartbeat_interval_secs"`
+		HeartbeatTimeoutCount int    `json:"heartbeat_timeout_count"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
+		return
+	}
+
+	if req.PlatformSIPAddress == "" || req.DeviceID == "" {
+		writeError(w, http.StatusBadRequest, "platform_sip_address and device_id are required")
+		return
+	}
+
+	// Read existing config file to preserve all sections.
+	data, err := os.ReadFile(s.cfg.ConfigPath)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to read config: %v", err))
+		return
+	}
+
+	// Unmarshal into generic map to preserve all sections.
+	var cfg map[string]interface{}
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to parse config: %v", err))
+		return
+	}
+
+	// Update only the gb28181 section.
+	cfg["gb28181"] = map[string]interface{}{
+		"enabled":                 req.Enabled,
+		"platform_sip_address":    req.PlatformSIPAddress,
+		"platform_sip_port":       req.PlatformSIPPort,
+		"device_id":               req.DeviceID,
+		"channel_id":              req.ChannelID,
+		"sip_domain":              req.SIPDomain,
+		"password":                req.Password,
+		"local_sip_port":          req.LocalSIPPort,
+		"register_interval_secs":  req.RegisterIntervalSecs,
+		"heartbeat_interval_secs": req.HeartbeatIntervalSecs,
+		"heartbeat_timeout_count": req.HeartbeatTimeoutCount,
+	}
+
+	// Marshal the complete config back to YAML.
+	out, err := yaml.Marshal(cfg)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to marshal config: %v", err))
+		return
+	}
+
+	// Atomic write: temp file in same directory, then rename.
+	dir := filepath.Dir(s.cfg.ConfigPath)
+	tmpFile, err := os.CreateTemp(dir, filepath.Base(s.cfg.ConfigPath)+".*.tmp")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create temp file: %v", err))
+		return
+	}
+	tmpPath := tmpFile.Name()
+
+	if _, err := tmpFile.Write(out); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to write temp file: %v", err))
+		return
+	}
+	if err := tmpFile.Sync(); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to sync temp file: %v", err))
+		return
+	}
+	if err := tmpFile.Close(); err != nil {
+		os.Remove(tmpPath)
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to close temp file: %v", err))
+		return
+	}
+	if err := os.Rename(tmpPath, s.cfg.ConfigPath); err != nil {
+		os.Remove(tmpPath)
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to rename config: %v", err))
+		return
+	}
+
+	s.logger.Printf("web: GB28181 config updated, restarting in 500ms")
 
 	// Schedule restart after response is sent.
 	go func() {
