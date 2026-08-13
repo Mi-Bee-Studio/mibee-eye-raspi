@@ -43,7 +43,7 @@ func NewRtpPusher(conn *net.UDPConn, remoteAddr *net.UDPAddr) *RtpPusher {
 func BuildRtpPacket(payload []byte, marker bool, ssrc uint32, seqNum uint16, timestamp uint32) ([]byte, error) {
 	packet := &rtp.Packet{
 		Header: rtp.Header{
-			Version:        2, // RTP version 2
+			Version:        2,  // RTP version 2
 			PayloadType:    96, // PS over RTP per GB/T 28181
 			Marker:         marker,
 			SequenceNumber: seqNum,

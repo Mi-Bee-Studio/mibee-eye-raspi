@@ -96,7 +96,7 @@ func BuildProgramStreamMap() []byte {
 // value is the timestamp in 90kHz ticks.
 func encodePtsDts(value uint64, prefix byte) [5]byte {
 	return [5]byte{
-		(prefix<<4) | byte(((value>>30)&0x07)<<1) | 0x01,
+		(prefix << 4) | byte(((value>>30)&0x07)<<1) | 0x01,
 		byte((value >> 22) & 0xFF),
 		byte(((value>>15)&0x7F)<<1) | 0x01,
 		byte((value >> 7) & 0xFF),
@@ -197,7 +197,7 @@ func MuxH264ToPS(nalus [][]byte, isKeyFrame bool, pts, dts time.Time) []byte {
 
 	// Add pack header (EVERY access unit)
 	// SCR from PTS (approximate), mux_rate at typical value
-	scr := pts90k * 300 // Convert 90kHz to 27MHz
+	scr := pts90k * 300      // Convert 90kHz to 27MHz
 	muxRate := uint32(10000) // 50 bytes/sec units (adjust based on actual bitrate)
 	ps = append(ps, BuildPsPackHeader(scr, muxRate)...)
 

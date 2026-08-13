@@ -17,26 +17,26 @@ import (
 // SipMessage represents a SIP message (request or response).
 type SipMessage struct {
 	// Request fields
-	Method       string // REGISTER, INVITE, ACK, BYE, MESSAGE, CANCEL, OPTIONS
-	StatusCode   int    // For responses: 200, 401, etc.
-	RequestURI   string // e.g., "sip:3402000000@3402000000"
+	Method     string // REGISTER, INVITE, ACK, BYE, MESSAGE, CANCEL, OPTIONS
+	StatusCode int    // For responses: 200, 401, etc.
+	RequestURI string // e.g., "sip:3402000000@3402000000"
 
 	// Core headers (RFC 3261)
-	From      string // e.g., "<sip:34020000012000000001@3402000000>;tag=12345"
-	To        string // e.g., "<sip:3402000000@3402000000>;tag=67890"
-	CallID    string // e.g., "1234567890@192.168.1.100"
-	CSeq      string // e.g., "1 REGISTER"
-	Contact   string // e.g., "<sip:34020000012000000001@192.168.1.100:5060>"
-	Via       string // e.g., "SIP/2.0/UDP 192.168.1.100:5060;rport;branch=z9hG4bK..."
-	Expires   string // e.g., "3600"
+	From    string // e.g., "<sip:34020000012000000001@3402000000>;tag=12345"
+	To      string // e.g., "<sip:3402000000@3402000000>;tag=67890"
+	CallID  string // e.g., "1234567890@192.168.1.100"
+	CSeq    string // e.g., "1 REGISTER"
+	Contact string // e.g., "<sip:34020000012000000001@192.168.1.100:5060>"
+	Via     string // e.g., "SIP/2.0/UDP 192.168.1.100:5060;rport;branch=z9hG4bK..."
+	Expires string // e.g., "3600"
 
 	// Additional headers
-	MaxForwards    string
-	ContentType    string
-	ContentLength  int
+	MaxForwards     string
+	ContentType     string
+	ContentLength   int
 	WWWAuthenticate string // For 401 responses
 	Authorization   string // For authenticated requests
-	UserAgent      string
+	UserAgent       string
 
 	// Extension headers (case-insensitive lookup)
 	Headers map[string]string
@@ -170,7 +170,7 @@ func (m *SipMessage) Serialize() []byte {
 // Supports both requests and responses per RFC 3261.
 func Parse(data []byte) (SipMessage, error) {
 	msg := SipMessage{
-		Headers:    make(map[string]string),
+		Headers:     make(map[string]string),
 		MaxForwards: "70", // Default per RFC 3261
 	}
 	lines := strings.Split(string(data), "\r\n")
@@ -264,17 +264,17 @@ func Parse(data []byte) (SipMessage, error) {
 // If authHeader is non-empty, it adds the Authorization header.
 func BuildRegister(requestUri, from, to, callId, cseq, contact, authHeader string) SipMessage {
 	msg := SipMessage{
-		Method:       "REGISTER",
-		RequestURI:   requestUri,
-		From:         from,
-		To:           to,
-		CallID:       callId,
-		CSeq:         cseq,
-		Contact:      contact,
-		MaxForwards:  "70",
-		Expires:      "3600",
-		UserAgent:    "MiBee-GB28181/1.0",
-		Headers:      make(map[string]string),
+		Method:      "REGISTER",
+		RequestURI:  requestUri,
+		From:        from,
+		To:          to,
+		CallID:      callId,
+		CSeq:        cseq,
+		Contact:     contact,
+		MaxForwards: "70",
+		Expires:     "3600",
+		UserAgent:   "MiBee-GB28181/1.0",
+		Headers:     make(map[string]string),
 	}
 	if authHeader != "" {
 		msg.Authorization = authHeader
@@ -285,33 +285,33 @@ func BuildRegister(requestUri, from, to, callId, cseq, contact, authHeader strin
 // BuildBye creates a BYE request for terminating a dialog.
 func BuildBye(requestUri, from, to, callId, cseq, contact string) SipMessage {
 	return SipMessage{
-		Method:       "BYE",
-		RequestURI:   requestUri,
-		From:         from,
-		To:           to,
-		CallID:       callId,
-		CSeq:         cseq,
-		Contact:      contact,
-		MaxForwards:  "70",
-		UserAgent:    "MiBee-GB28181/1.0",
-		Headers:      make(map[string]string),
+		Method:      "BYE",
+		RequestURI:  requestUri,
+		From:        from,
+		To:          to,
+		CallID:      callId,
+		CSeq:        cseq,
+		Contact:     contact,
+		MaxForwards: "70",
+		UserAgent:   "MiBee-GB28181/1.0",
+		Headers:     make(map[string]string),
 	}
 }
 
 // Build200OK creates a 200 OK response.
 func Build200OK(requestUri, from, to, callId, cseq, contact, contentType, body string) SipMessage {
 	return SipMessage{
-		StatusCode:   200,
-		RequestURI:   requestUri,
-		From:         from,
-		To:           to,
-		CallID:       callId,
-		CSeq:         cseq,
-		Contact:      contact,
-		ContentType:  contentType,
-		Body:         body,
-		UserAgent:    "MiBee-GB28181/1.0",
-		Headers:      make(map[string]string),
+		StatusCode:  200,
+		RequestURI:  requestUri,
+		From:        from,
+		To:          to,
+		CallID:      callId,
+		CSeq:        cseq,
+		Contact:     contact,
+		ContentType: contentType,
+		Body:        body,
+		UserAgent:   "MiBee-GB28181/1.0",
+		Headers:     make(map[string]string),
 	}
 }
 

@@ -80,14 +80,16 @@ func ParseChallenge(wwwAuthHeader string) (DigestAuth, error) {
 // Returns the hex-encoded response string.
 //
 // Basic Digest (qop not set or qop != "auth"):
-//   HA1 = MD5(username:realm:password)
-//   HA2 = MD5(method:uri)
-//   response = MD5(HA1:nonce:HA2)
+//
+//	HA1 = MD5(username:realm:password)
+//	HA2 = MD5(method:uri)
+//	response = MD5(HA1:nonce:HA2)
 //
 // With qop="auth":
-//   response = MD5(HA1:nonce:00000001:0a4f113b:cnonce:auth:HA2)
-//   (Note: full qop support requires nc and cnonce; this implementation
-//    provides basic qop handling; full qop can be added when needed)
+//
+//	response = MD5(HA1:nonce:00000001:0a4f113b:cnonce:auth:HA2)
+//	(Note: full qop support requires nc and cnonce; this implementation
+//	 provides basic qop handling; full qop can be added when needed)
 func ComputeResponse(username, realm, password, nonce, uri, method, algorithm string) string {
 	// Default to MD5 per RFC 2617 §3.2.1 (GB/T 28181 platforms use MD5)
 	if algorithm == "" {

@@ -14,6 +14,7 @@
 // Splitting would create artificial boundaries that don't reflect the actual
 // logical structure of the GB28181 protocol lifecycle.
 package gb28181
+
 import (
 	"context"
 	"fmt"
@@ -57,6 +58,7 @@ func New(cfg config.GB28181Config, hub *h264.AUHub) *Server {
 func (s *Server) SetTestMode() {
 	s.testMode = true
 }
+
 // Start starts the GB28181 server SIP listener and lifecycle.
 func (s *Server) Start(ctx context.Context) error {
 	// Bind SIP UDP
