@@ -238,22 +238,43 @@ func localIP() string {
 	return "0.0.0.0"
 }
 
+// getLocalIP determines the local source IP that would be used to reach
+// remoteAddr, by dialing a temporary UDP connection (no packets are sent).
+func getLocalIP(remoteAddr string) (string, error) {
+	conn, err := net.Dial("udp", remoteAddr)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	localAddr := conn.LocalAddr().(*net.UDPAddr)
+	return localAddr.IP.String(), nil
+}
+
 // runRegisterLifecycle performs the REGISTER authentication flow.
 func (s *Server) runRegisterLifecycle(ctx context.Context) error {
 	requestURI := fmt.Sprintf("sip:%s@%s", s.cfg.SIPDomain, s.cfg.SIPDomain)
 	from := fmt.Sprintf("<sip:%s@%s>", s.cfg.DeviceID, s.cfg.SIPDomain)
 	to := from
-	callID := fmt.Sprintf("%d@%s", time.Now().Unix(), localIP())
-	cseq := "1 REGISTER"
-	contact := fmt.Sprintf("<sip:%s@%s:%d>", s.cfg.DeviceID, localIP(), s.cfg.LocalSIPPort)
 	platformAddr := &net.UDPAddr{
 		IP:   net.ParseIP(s.cfg.PlatformSIPAddress),
 		Port: s.cfg.PlatformSIPPort,
 	}
 
+	// Determine the real local IP toward the platform for Via/Contact headers
+	localIPAddr, err := getLocalIP(platformAddr.String())
+	if err != nil {
+		slog.Warn("gb28181: failed to determine local IP, falling back to interface scan", "error", err)
+		localIPAddr = localIP()
+	}
+	callID := fmt.Sprintf("%d@%s", time.Now().Unix(), localIPAddr)
+	cseq := "1 REGISTER"
+	contact := fmt.Sprintf("<sip:%s@%s:%d>", s.cfg.DeviceID, localIPAddr, s.cfg.LocalSIPPort)
+	via := fmt.Sprintf("SIP/2.0/UDP %s:%d;branch=z9hG4bK%016x", localIPAddr, s.cfg.LocalSIPPort, time.Now().UnixNano())
+
 	// Initial REGISTER
 	slog.Info("gb28181: sending initial REGISTER")
 	regMsg := BuildRegister(requestURI, from, to, callID, cseq, contact, "")
+	regMsg.Via = via
 	if _, err := s.sipConn.WriteToUDP(regMsg.Serialize(), platformAddr); err != nil {
 		return fmt.Errorf("sending REGISTER: %w", err)
 	}
@@ -280,6 +301,7 @@ func (s *Server) runRegisterLifecycle(ctx context.Context) error {
 		authHeader := BuildAuthorizationHeader(auth, s.cfg.DeviceID, s.cfg.Password, requestURI, "REGISTER")
 		cseq = "2 REGISTER"
 		authMsg := BuildRegister(requestURI, from, to, callID, cseq, contact, authHeader)
+		authMsg.Via = via
 
 		if _, err := s.sipConn.WriteToUDP(authMsg.Serialize(), platformAddr); err != nil {
 			return fmt.Errorf("sending authenticated REGISTER: %w", err)
@@ -320,8 +342,15 @@ func (s *Server) sendKeepalive(ctx context.Context) error {
 	requestURI := fmt.Sprintf("sip:%s@%s", s.cfg.SIPDomain, s.cfg.SIPDomain)
 	from := fmt.Sprintf("<sip:%s@%s>", s.cfg.DeviceID, s.cfg.SIPDomain)
 	to := from
-	callID := fmt.Sprintf("keepalive-%d@%s", time.Now().Unix(), localIP())
-	contact := fmt.Sprintf("<sip:%s@%s:%d>", s.cfg.DeviceID, localIP(), s.cfg.LocalSIPPort)
+
+	// Determine the real local IP toward the platform for Via/Contact headers
+	localIPAddr, err := getLocalIP(platformAddr.String())
+	if err != nil {
+		slog.Warn("gb28181: failed to determine local IP, falling back to interface scan", "error", err)
+		localIPAddr = localIP()
+	}
+	callID := fmt.Sprintf("keepalive-%d@%s", time.Now().Unix(), localIPAddr)
+	contact := fmt.Sprintf("<sip:%s@%s:%d>", s.cfg.DeviceID, localIPAddr, s.cfg.LocalSIPPort)
 
 	msg := BuildKeepaliveMessage(strconv.FormatInt(time.Now().Unix(), 10), s.cfg.DeviceID, "OK")
 	msg.RequestURI = requestURI
@@ -330,6 +359,7 @@ func (s *Server) sendKeepalive(ctx context.Context) error {
 	msg.CallID = callID
 	msg.Contact = contact
 	msg.CSeq = "1 MESSAGE"
+	msg.Via = fmt.Sprintf("SIP/2.0/UDP %s:%d;branch=z9hG4bK%016x", localIPAddr, s.cfg.LocalSIPPort, time.Now().UnixNano())
 
 	if _, err := s.sipConn.WriteToUDP(msg.Serialize(), platformAddr); err != nil {
 		return fmt.Errorf("sending keepalive MESSAGE: %w", err)

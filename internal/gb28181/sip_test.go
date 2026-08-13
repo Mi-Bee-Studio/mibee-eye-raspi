@@ -1,6 +1,7 @@
 package gb28181
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -112,6 +113,7 @@ func TestDigestAuth_MD5_Default(t *testing.T) {
 		"sip:3402000000",
 		"REGISTER",
 		auth.Algorithm, // Empty - should default to MD5
+		"", "", "",     // No qop
 	)
 
 	// Expected MD5 response per RFC 2617 example
@@ -145,6 +147,7 @@ func TestDigestAuth_SHA256_WhenRequested(t *testing.T) {
 		"sip:3402000000",
 		"REGISTER",
 		auth.Algorithm,
+		"", "", "", // No qop
 	)
 
 	// SHA-256 response (different from MD5)
@@ -156,6 +159,7 @@ func TestDigestAuth_SHA256_WhenRequested(t *testing.T) {
 		"sip:3402000000",
 		"REGISTER",
 		"MD5",
+		"", "", "", // No qop
 	)
 
 	if response == md5Response {
@@ -343,12 +347,37 @@ func TestComputeResponse_KnownValue(t *testing.T) {
 		"dcd98b7102dd2f0e8b11d0f600bfb0c093",
 		"/dir/index.html",
 		"GET",
-		"", // Empty algorithm defaults to MD5
+		"",         // Empty algorithm defaults to MD5
+		"", "", "", // No qop
 	)
 
 	expected := "670fd8c2df070c60b045671b8b24ff02"
 	if response != expected {
 		t.Errorf("ComputeResponse mismatch: got %s, want %s", response, expected)
+	}
+}
+
+// TestComputeResponse_QopAuth tests the RFC 2617 §3.5 example with qop="auth".
+func TestComputeResponse_QopAuth(t *testing.T) {
+	// RFC 2617 Section 3.5 example:
+	// username="Mufasa", realm="testrealm@host.com", password="Circle Of Life"
+	// nonce="dcd98b7102dd2f0e8b11d0f600bfb0c093", uri="/dir/index.html", method="GET"
+	// qop=auth, nc=00000001, cnonce="0a4f113b"
+	// Expected response = "6629fae49393a05397450978507c4ef1"
+	response := ComputeResponse(
+		"Mufasa",
+		"testrealm@host.com",
+		"Circle Of Life",
+		"dcd98b7102dd2f0e8b11d0f600bfb0c093",
+		"/dir/index.html",
+		"GET",
+		"MD5",
+		"auth", "00000001", "0a4f113b",
+	)
+
+	expected := "6629fae49393a05397450978507c4ef1"
+	if response != expected {
+		t.Errorf("ComputeResponse qop=auth mismatch: got %s, want %s", response, expected)
 	}
 }
 
@@ -453,6 +482,46 @@ func TestBuildAuthorizationHeader(t *testing.T) {
 
 	if !strings.HasPrefix(authHeader, "Digest ") {
 		t.Error("Authorization header should start with 'Digest '")
+	}
+}
+
+// TestBuildAuthorizationHeader_QopAuth verifies nc and cnonce are included when qop is set.
+func TestBuildAuthorizationHeader_QopAuth(t *testing.T) {
+	challenge := DigestAuth{
+		Realm:     "3402000000",
+		Nonce:     "abc123",
+		Algorithm: "MD5",
+		Qop:       "auth",
+	}
+
+	authHeader := BuildAuthorizationHeader(
+		challenge,
+		"34020000012000000001",
+		"password123",
+		"sip:3402000000",
+		"REGISTER",
+	)
+
+	// qop, nc, and cnonce must be present for the NVR to accept the digest
+	required := []string{
+		`qop=auth`,
+		`nc=00000001`,
+		`cnonce="`,
+	}
+	for _, comp := range required {
+		if !strings.Contains(authHeader, comp) {
+			t.Errorf("Authorization header missing %s: %s", comp, authHeader)
+		}
+	}
+
+	// cnonce must be a 16-char hex string
+	idx := strings.Index(authHeader, `cnonce="`)
+	if idx < 0 {
+		t.Fatal("cnonce not found in Authorization header")
+	}
+	cnonce := authHeader[idx+len(`cnonce="`) : idx+len(`cnonce="`)+16]
+	if _, err := strconv.ParseUint(cnonce, 16, 64); err != nil {
+		t.Errorf("cnonce %q is not hex: %v", cnonce, err)
 	}
 }
 

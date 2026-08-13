@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // DigestAuth represents a parsed Digest authentication challenge.
@@ -76,10 +77,13 @@ func ParseChallenge(wwwAuthHeader string) (DigestAuth, error) {
 //   - uri: Request-URI (e.g., "sip:3402000000")
 //   - method: SIP method (e.g., "REGISTER")
 //   - algorithm: Hash algorithm ("" defaults to "MD5" per RFC 2617 §3.2.1)
+//   - qop: Quality of protection ("" or "auth")
+//   - nc: Nonce count (8 hex digits, e.g., "00000001")
+//   - cnonce: Client nonce (client-generated hex string)
 //
 // Returns the hex-encoded response string.
 //
-// Basic Digest (qop not set or qop != "auth"):
+// Basic Digest (qop not set):
 //
 //	HA1 = MD5(username:realm:password)
 //	HA2 = MD5(method:uri)
@@ -87,10 +91,8 @@ func ParseChallenge(wwwAuthHeader string) (DigestAuth, error) {
 //
 // With qop="auth":
 //
-//	response = MD5(HA1:nonce:00000001:0a4f113b:cnonce:auth:HA2)
-//	(Note: full qop support requires nc and cnonce; this implementation
-//	 provides basic qop handling; full qop can be added when needed)
-func ComputeResponse(username, realm, password, nonce, uri, method, algorithm string) string {
+//	response = MD5(HA1:nonce:nc:cnonce:qop:HA2)
+func ComputeResponse(username, realm, password, nonce, uri, method, algorithm, qop, nc, cnonce string) string {
 	// Default to MD5 per RFC 2617 §3.2.1 (GB/T 28181 platforms use MD5)
 	if algorithm == "" {
 		algorithm = "MD5"
@@ -102,11 +104,13 @@ func ComputeResponse(username, realm, password, nonce, uri, method, algorithm st
 	// Compute HA2 = hash(method:uri)
 	ha2 := ComputeDigest(algorithm, method, uri)
 
-	// Compute response = hash(HA1:nonce:HA2)
-	// (Basic Digest without qop; qop="auth" adds nc and cnonce)
-	response := ComputeDigest(algorithm, ha1, nonce, ha2)
-
-	return response
+	// Compute response per RFC 2617 §3.2.2.1:
+	//   qop="auth": MD5(HA1:nonce:nc:cnonce:qop:HA2)
+	//   no qop:     MD5(HA1:nonce:HA2)
+	if qop == "auth" {
+		return ComputeDigest(algorithm, ha1, nonce, nc, cnonce, qop, ha2)
+	}
+	return ComputeDigest(algorithm, ha1, nonce, ha2)
 }
 
 // BuildAuthorizationHeader builds the full Authorization header value.
@@ -121,7 +125,14 @@ func ComputeResponse(username, realm, password, nonce, uri, method, algorithm st
 // Returns the complete Authorization header string, e.g.:
 // Digest username="34020000012000000001", realm="3402000000", nonce="abc123", uri="sip:3402000000", response="..."
 func BuildAuthorizationHeader(authChallenge DigestAuth, username, password, uri, method string) string {
-	response := ComputeResponse(username, authChallenge.Realm, password, authChallenge.Nonce, uri, method, authChallenge.Algorithm)
+	nc := "00000001"
+	cnonce := generateCnonce()
+
+	response := ComputeResponse(
+		username, authChallenge.Realm, password, authChallenge.Nonce,
+		uri, method, authChallenge.Algorithm,
+		authChallenge.Qop, nc, cnonce,
+	)
 
 	var buf strings.Builder
 	buf.WriteString("Digest username=\"")
@@ -144,6 +155,11 @@ func BuildAuthorizationHeader(authChallenge DigestAuth, username, password, uri,
 	if authChallenge.Qop != "" {
 		buf.WriteString(", qop=")
 		buf.WriteString(authChallenge.Qop)
+		buf.WriteString(", nc=")
+		buf.WriteString(nc)
+		buf.WriteString(", cnonce=\"")
+		buf.WriteString(cnonce)
+		buf.WriteString("\"")
 	}
 
 	if authChallenge.Opaque != "" {
@@ -153,4 +169,9 @@ func BuildAuthorizationHeader(authChallenge DigestAuth, username, password, uri,
 	}
 
 	return buf.String()
+}
+
+// generateCnonce returns a client nonce as a 16-char hex string.
+func generateCnonce() string {
+	return fmt.Sprintf("%016x", time.Now().UnixNano())
 }
