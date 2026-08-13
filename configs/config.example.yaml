@@ -164,3 +164,38 @@ metrics:
 
   # Metrics HTTP port (default: 9100, conflicts with Prometheus node_exporter)
   port: 9100
+
+# GB28181 SIP registration settings (disabled by default)
+gb28181:
+  # Enable GB28181 registration with a SIP platform (default: false)
+  enabled: false
+
+  # SIP server (platform) address
+  platform_sip_address: "192.168.1.1"
+
+  # SIP server (platform) port
+  platform_sip_port: 5060
+
+  # GB28181 device ID (20 digits)
+  device_id: "34020000001320000001"
+
+  # GB28181 channel ID (20 digits)
+  channel_id: "34020000001320000001"
+
+  # GB28181 SIP domain
+  sip_domain: "3402000000"
+
+  # SIP authentication password
+  password: "12345678"
+
+  # Local SIP listening port
+  local_sip_port: 5060
+
+  # SIP REGISTER interval in seconds
+  register_interval_secs: 60
+
+  # SIP keepalive heartbeat interval in seconds
+  heartbeat_interval_secs: 60
+
+  # Missed heartbeats before declaring the platform unreachable
+  heartbeat_timeout_count: 3

@@ -105,6 +105,20 @@ type HLSConfig struct {
 	Enabled         bool          `yaml:"enabled"`         // Enable HLS server (default: false)
 	SegmentDuration time.Duration `yaml:"segment_duration"` // Target segment duration (default: 2s)
 }
+
+type GB28181Config struct {
+	Enabled               bool   `yaml:"enabled"`                 // Enable GB28181 registration (default: false)
+	PlatformSIPAddress    string `yaml:"platform_sip_address"`    // SIP server (platform) address
+	PlatformSIPPort       int    `yaml:"platform_sip_port"`       // SIP server (platform) port
+	DeviceID              string `yaml:"device_id"`               // GB28181 device ID (20 digits)
+	ChannelID             string `yaml:"channel_id"`              // GB28181 channel ID (20 digits)
+	SIPDomain             string `yaml:"sip_domain"`              // GB28181 SIP domain
+	Password              string `yaml:"password"`                // SIP authentication password
+	LocalSIPPort          int    `yaml:"local_sip_port"`          // Local SIP listening port
+	RegisterIntervalSecs  int    `yaml:"register_interval_secs"`  // SIP REGISTER interval (seconds)
+	HeartbeatIntervalSecs int    `yaml:"heartbeat_interval_secs"` // SIP keepalive heartbeat interval (seconds)
+	HeartbeatTimeoutCount int    `yaml:"heartbeat_timeout_count"` // Missed heartbeats before declaring timeout
+}
 // Config is the top-level configuration for MiBee Eye.
 type Config struct {
 	Camera  CameraConfig  `yaml:"camera"`
@@ -117,6 +131,7 @@ type Config struct {
 	Snapshot SnapshotConfig `yaml:"snapshot"`
 	RTMP     RTMPConfig     `yaml:"rtmp"`
 	HLS      HLSConfig      `yaml:"hls"`
+	GB28181  GB28181Config  `yaml:"gb28181"`
 }
 
 // DefaultConfig returns a Config with all default values.
@@ -191,7 +206,20 @@ func DefaultConfig() *Config {
 			Enabled:         false,
 			SegmentDuration: 2 * time.Second,
 		},
-}
+		GB28181: GB28181Config{
+			Enabled:               false,
+			PlatformSIPAddress:    "192.168.1.1",
+			PlatformSIPPort:       5060,
+			DeviceID:              "34020000001320000001",
+			ChannelID:             "34020000001320000001",
+			SIPDomain:             "3402000000",
+			Password:              "12345678",
+			LocalSIPPort:          5060,
+			RegisterIntervalSecs:  60,
+			HeartbeatIntervalSecs: 60,
+			HeartbeatTimeoutCount: 3,
+		},
+	}
 }
 // Load reads a YAML configuration file at path and returns a Config.
 // Values from the file are merged over DefaultConfig().
@@ -285,6 +313,18 @@ func applyEnvOverrides(cfg *Config) {
 	// HLS section
 	overrideBool("MIBEE_EYE_HLS_ENABLED", &cfg.HLS.Enabled)
 	overrideDuration("MIBEE_EYE_HLS_SEGMENT_DURATION", &cfg.HLS.SegmentDuration)
+	// GB28181 section
+	overrideBool("MIBEE_EYE_GB28181_ENABLED", &cfg.GB28181.Enabled)
+	overrideString("MIBEE_EYE_GB28181_PLATFORM_SIP_ADDRESS", &cfg.GB28181.PlatformSIPAddress)
+	overrideInt("MIBEE_EYE_GB28181_PLATFORM_SIP_PORT", &cfg.GB28181.PlatformSIPPort)
+	overrideString("MIBEE_EYE_GB28181_DEVICE_ID", &cfg.GB28181.DeviceID)
+	overrideString("MIBEE_EYE_GB28181_CHANNEL_ID", &cfg.GB28181.ChannelID)
+	overrideString("MIBEE_EYE_GB28181_SIP_DOMAIN", &cfg.GB28181.SIPDomain)
+	overrideString("MIBEE_EYE_GB28181_PASSWORD", &cfg.GB28181.Password)
+	overrideInt("MIBEE_EYE_GB28181_LOCAL_SIP_PORT", &cfg.GB28181.LocalSIPPort)
+	overrideInt("MIBEE_EYE_GB28181_REGISTER_INTERVAL_SECS", &cfg.GB28181.RegisterIntervalSecs)
+	overrideInt("MIBEE_EYE_GB28181_HEARTBEAT_INTERVAL_SECS", &cfg.GB28181.HeartbeatIntervalSecs)
+	overrideInt("MIBEE_EYE_GB28181_HEARTBEAT_TIMEOUT_COUNT", &cfg.GB28181.HeartbeatTimeoutCount)
 }
 
 // Sentinel errors for config validation.

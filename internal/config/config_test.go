@@ -441,3 +441,101 @@ logging: {}
 		t.Errorf("expected empty password, got %q", cfg.ONVIF.Password)
 	}
 }
+
+func TestGB28181Config_Defaults(t *testing.T) {
+	cfg := DefaultConfig()
+
+	if cfg.GB28181.Enabled {
+		t.Errorf("GB28181.Enabled = true, want false")
+	}
+	if cfg.GB28181.PlatformSIPAddress != "192.168.1.1" {
+		t.Errorf("GB28181.PlatformSIPAddress = %q, want %q", cfg.GB28181.PlatformSIPAddress, "192.168.1.1")
+	}
+	if cfg.GB28181.PlatformSIPPort != 5060 {
+		t.Errorf("GB28181.PlatformSIPPort = %d, want 5060", cfg.GB28181.PlatformSIPPort)
+	}
+	if cfg.GB28181.DeviceID != "34020000001320000001" {
+		t.Errorf("GB28181.DeviceID = %q, want %q", cfg.GB28181.DeviceID, "34020000001320000001")
+	}
+	if cfg.GB28181.ChannelID != "34020000001320000001" {
+		t.Errorf("GB28181.ChannelID = %q, want %q", cfg.GB28181.ChannelID, "34020000001320000001")
+	}
+	if cfg.GB28181.SIPDomain != "3402000000" {
+		t.Errorf("GB28181.SIPDomain = %q, want %q", cfg.GB28181.SIPDomain, "3402000000")
+	}
+	if cfg.GB28181.Password != "12345678" {
+		t.Errorf("GB28181.Password = %q, want %q", cfg.GB28181.Password, "12345678")
+	}
+	if cfg.GB28181.LocalSIPPort != 5060 {
+		t.Errorf("GB28181.LocalSIPPort = %d, want 5060", cfg.GB28181.LocalSIPPort)
+	}
+	if cfg.GB28181.RegisterIntervalSecs != 60 {
+		t.Errorf("GB28181.RegisterIntervalSecs = %d, want 60", cfg.GB28181.RegisterIntervalSecs)
+	}
+	if cfg.GB28181.HeartbeatIntervalSecs != 60 {
+		t.Errorf("GB28181.HeartbeatIntervalSecs = %d, want 60", cfg.GB28181.HeartbeatIntervalSecs)
+	}
+	if cfg.GB28181.HeartbeatTimeoutCount != 3 {
+		t.Errorf("GB28181.HeartbeatTimeoutCount = %d, want 3", cfg.GB28181.HeartbeatTimeoutCount)
+	}
+}
+
+func TestGB28181Config_EnvOverride(t *testing.T) {
+	t.Setenv("MIBEE_EYE_GB28181_ENABLED", "true")
+	t.Setenv("MIBEE_EYE_GB28181_PLATFORM_SIP_ADDRESS", "10.0.0.5")
+	t.Setenv("MIBEE_EYE_GB28181_PLATFORM_SIP_PORT", "6060")
+	t.Setenv("MIBEE_EYE_GB28181_DEVICE_ID", "34020000002000000002")
+	t.Setenv("MIBEE_EYE_GB28181_CHANNEL_ID", "34020000002000000003")
+	t.Setenv("MIBEE_EYE_GB28181_SIP_DOMAIN", "3402000001")
+	t.Setenv("MIBEE_EYE_GB28181_PASSWORD", "envpass")
+	t.Setenv("MIBEE_EYE_GB28181_LOCAL_SIP_PORT", "7060")
+	t.Setenv("MIBEE_EYE_GB28181_REGISTER_INTERVAL_SECS", "120")
+	t.Setenv("MIBEE_EYE_GB28181_HEARTBEAT_INTERVAL_SECS", "30")
+	t.Setenv("MIBEE_EYE_GB28181_HEARTBEAT_TIMEOUT_COUNT", "5")
+
+	// YAML values differ from env values to prove env wins
+	cfgYAML := `
+gb28181:
+  platform_sip_address: "10.9.9.9"
+  platform_sip_port: 9999
+`
+	path := writeTempYAML(t, cfgYAML)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	if !cfg.GB28181.Enabled {
+		t.Errorf("GB28181.Enabled = false, want true (env override)")
+	}
+	if cfg.GB28181.PlatformSIPAddress != "10.0.0.5" {
+		t.Errorf("GB28181.PlatformSIPAddress = %q, want 10.0.0.5 (env override)", cfg.GB28181.PlatformSIPAddress)
+	}
+	if cfg.GB28181.PlatformSIPPort != 6060 {
+		t.Errorf("GB28181.PlatformSIPPort = %d, want 6060 (env override)", cfg.GB28181.PlatformSIPPort)
+	}
+	if cfg.GB28181.DeviceID != "34020000002000000002" {
+		t.Errorf("GB28181.DeviceID = %q, want 34020000002000000002 (env override)", cfg.GB28181.DeviceID)
+	}
+	if cfg.GB28181.ChannelID != "34020000002000000003" {
+		t.Errorf("GB28181.ChannelID = %q, want 34020000002000000003 (env override)", cfg.GB28181.ChannelID)
+	}
+	if cfg.GB28181.SIPDomain != "3402000001" {
+		t.Errorf("GB28181.SIPDomain = %q, want 3402000001 (env override)", cfg.GB28181.SIPDomain)
+	}
+	if cfg.GB28181.Password != "envpass" {
+		t.Errorf("GB28181.Password = %q, want envpass (env override)", cfg.GB28181.Password)
+	}
+	if cfg.GB28181.LocalSIPPort != 7060 {
+		t.Errorf("GB28181.LocalSIPPort = %d, want 7060 (env override)", cfg.GB28181.LocalSIPPort)
+	}
+	if cfg.GB28181.RegisterIntervalSecs != 120 {
+		t.Errorf("GB28181.RegisterIntervalSecs = %d, want 120 (env override)", cfg.GB28181.RegisterIntervalSecs)
+	}
+	if cfg.GB28181.HeartbeatIntervalSecs != 30 {
+		t.Errorf("GB28181.HeartbeatIntervalSecs = %d, want 30 (env override)", cfg.GB28181.HeartbeatIntervalSecs)
+	}
+	if cfg.GB28181.HeartbeatTimeoutCount != 5 {
+		t.Errorf("GB28181.HeartbeatTimeoutCount = %d, want 5 (env override)", cfg.GB28181.HeartbeatTimeoutCount)
+	}
+}
