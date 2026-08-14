@@ -17,6 +17,7 @@ func (s *Server) startTCPListener(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("binding SIP TCP on port %d: %w", s.cfg.LocalSIPPort, err)
 	}
+	s.tcpListener = listener
 	slog.Info("gb28181: SIP TCP listener started", "port", s.cfg.LocalSIPPort)
 
 	// Accept connections in a goroutine

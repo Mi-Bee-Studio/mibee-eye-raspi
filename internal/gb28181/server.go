@@ -37,6 +37,8 @@ type Server struct {
 	sipConn      *net.UDPConn
 	mediaConn    *net.UDPConn
 	mediaTCPConn *net.TCPConn
+	// tcpListener is the TCP SIP listener (transport="tcp" only)
+	tcpListener net.Listener
 	// tcpConns tracks active TCP SIP connections keyed by remote address
 	tcpConns    sync.Map
 	mu          sync.Mutex
@@ -79,15 +81,6 @@ func (s *Server) SetTestMode() {
 
 // Start starts the GB28181 server SIP listener and lifecycle.
 func (s *Server) Start(ctx context.Context) error {
-	// Bind SIP UDP
-	sipAddr := &net.UDPAddr{Port: s.cfg.LocalSIPPort}
-	sipConn, err := net.ListenUDP("udp", sipAddr)
-	if err != nil {
-		return fmt.Errorf("binding SIP UDP on port %d: %w", s.cfg.LocalSIPPort, err)
-	}
-	s.sipConn = sipConn
-	slog.Info("gb28181: SIP UDP listener started", "port", s.cfg.LocalSIPPort)
-
 	// Initialize device context for MANSCDP responses
 	s.devCtx = DeviceContext{
 		DeviceID:     s.cfg.DeviceID,
@@ -99,11 +92,25 @@ func (s *Server) Start(ctx context.Context) error {
 		LocalIP:      localIP(),
 		LocalPort:    s.cfg.LocalSIPPort,
 	}
-	slog.Info("gb28181: SIP UDP listener started", "port", s.cfg.LocalSIPPort)
 
 	// Create child context with cancel for lifecycle management
 	ctx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
+
+	// TCP transport: listen for inbound SIP connections. The platform
+	// connects to us and drives the dialog (no outbound REGISTER lifecycle).
+	if s.cfg.Transport == "tcp" {
+		return s.startTCPListener(ctx)
+	}
+
+	// Bind SIP UDP
+	sipAddr := &net.UDPAddr{Port: s.cfg.LocalSIPPort}
+	sipConn, err := net.ListenUDP("udp", sipAddr)
+	if err != nil {
+		return fmt.Errorf("binding SIP UDP on port %d: %w", s.cfg.LocalSIPPort, err)
+	}
+	s.sipConn = sipConn
+	slog.Info("gb28181: SIP UDP listener started", "port", s.cfg.LocalSIPPort)
 
 	// Run REGISTER lifecycle (skip in test mode)
 	if !s.testMode {
@@ -227,6 +234,9 @@ func (s *Server) Stop() {
 	}
 	if s.mediaTCPConn != nil {
 		s.mediaTCPConn.Close()
+	}
+	if s.tcpListener != nil {
+		s.tcpListener.Close()
 	}
 	if s.sipConn != nil {
 		s.sipConn.Close()
