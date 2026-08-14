@@ -159,3 +159,55 @@ ONVIF password is **required** — service refuses to start if empty. Set via `o
 | Change web UI | `internal/web/static/` (app.js, index.html, style.css — embedded via `//go:embed`) |
 | Fix SPS/PPS injection | `cmd/server/main.go` (goroutine in Step 2, caches SPS/PPS, injects before IDR) |
 | Add GB28181 settings | `internal/gb28181/` (SIP server, RTP push, PS mux) + `internal/config/config.go` (GB28181Config struct) + `internal/web/static/app.js` (settings panel) |
+
+## GB28181 Interop Notes (NVR-tested)
+
+Real-world interop bugs discovered while testing against MiBee NVR
+(192.168.63.197, SIP platform on port 5060). These are protocol-level
+issues that unit tests don't catch — only surface with a real SIP stack
+on the other end.
+
+### Missing qop="auth" support
+- **Symptom**: NVR rejects digest auth response with 403 Forbidden
+  when it sends `qop="auth"` in the 401 challenge.
+- **Root cause**: Without qop support, the response hash formula is wrong:
+  should be `MD5(HA1:nonce:nc:cnonce:qop:HA2)` not `MD5(HA1:nonce:HA2)`.
+- **Fix**: Pass qop through, generate cnonce, use nc=00000001.
+- **Files**: `internal/gb28181/auth.go`
+
+### Via branch not unique for authed REGISTER
+- **Symptom**: NVR treats the authed REGISTER as a retransmission and
+  replays the cached 401; registration never completes.
+- **Root cause**: The Go code computed `via` once and reused it for both
+  REGISTER messages. Same branch parameter means same request to NVR.
+- **Fix**: Generate a new Via with different branch for the authed REGISTER.
+- **Files**: `internal/gb28181/client.go`
+
+### Local IP detection returns 0.0.0.0
+- **Symptom**: NVR can't route SIP responses; 200 OK never arrives.
+- **Root cause**: SIP socket binds to `0.0.0.0:5060`, so `socket.local_addr()`
+  returns `0.0.0.0`. The NVR can't route responses to `0.0.0.0`.
+- **Fix**: Create a temporary UDP socket, connect to platform address,
+  read its local_addr() to get the real source IP.
+- **Files**: `internal/gb28181/network.go`
+
+### MANSCDP XML format: CmdType/SN must be attributes
+- **Symptom**: NVR rejects MANSCDP XML messages with parse error.
+- **Root cause**: NVR's `manscdp.Decode()` expects
+  `<Notify CmdType="Keepalive" SN="1">` (attributes), not
+  `<Notify><CmdType>Keepalive</CmdType><SN>1</SN>...` (child elements).
+- **Fix**: Go adds `,attr` to struct tags (e.g., `xml:"CmdType,attr"`).
+- **Files**: `internal/gb28181/manscdp.go`
+
+### mtxrpicam libcamera ABI incompatibility
+- **Symptom**: The mtxrpicam binary from mediamtx-rpicamera v2.8.0
+  bundles libcamera.so.9.9 (custom soname). On Debian 13 trixie with
+  system libcamera 0.7.1, the binary segfaults after camera init.
+  Building from source against system libcamera fails due to meson wrap
+  dependencies.
+- **Root cause**: mtxrpicam uses a vendored libcamera with custom
+  soname that conflicts with system libcamera on newer distros.
+- **Fix**: New `rpicamvid` camera mode uses system `rpicam-vid` binary
+  instead. Config: `camera.mode: "rpicamvid"`. No custom dependencies,
+  uses stock libcamera stack.
+- **Files**: `internal/camera/params.go` (mode enum), `internal/camera/rpicamvid.go` (new implementation), `cmd/server/main.go` (mode switch)
