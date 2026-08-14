@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -793,5 +794,125 @@ func TestServer_ReInviteReplacesPreviousSession(t *testing.T) {
 		if n >= 12 && buf[0]>>6 == 2 {
 			t.Fatal("old media address still receiving RTP after re-INVITE (leaked goroutine)")
 		}
+	}
+}
+
+// fakePlatform mimics the NVR SIP stack for lifecycle tests: it answers
+// REGISTER with 401-then-200 (digest not validated) and can be switched
+// to reject keepalive MESSAGEs with 403 (simulating an NVR restart that
+// lost registration state).
+type fakePlatform struct {
+	conn    *net.UDPConn
+	rejectKA atomic.Bool
+	registers atomic.Int32 // REGISTERs carrying Authorization (completed flows)
+}
+
+func newFakePlatform(t *testing.T) *fakePlatform {
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatalf("fake platform bind: %v", err)
+	}
+	fp := &fakePlatform{conn: conn}
+	go fp.serve()
+	return fp
+}
+
+func (fp *fakePlatform) addr() string {
+	return fp.conn.LocalAddr().String()
+}
+
+func (fp *fakePlatform) close() {
+	fp.conn.Close()
+}
+
+func (fp *fakePlatform) serve() {
+	buf := make([]byte, 4096)
+	for {
+		n, from, err := fp.conn.ReadFromUDP(buf)
+		if err != nil {
+			return
+		}
+		req, err := Parse(buf[:n])
+		if err != nil {
+			continue
+		}
+		switch {
+		case req.Method == "REGISTER" && req.Authorization == "":
+			fp.reply(from, req, 401, "Unauthorized",
+				"Digest realm=\"3402000000\", nonce=\"testnonce\", qop=\"auth\"")
+		case req.Method == "REGISTER":
+			fp.registers.Add(1)
+			fp.reply(from, req, 200, "OK", "")
+		case req.Method == "MESSAGE":
+			if fp.rejectKA.Load() {
+				fp.reply(from, req, 403, "Forbidden", "")
+			} else {
+				fp.reply(from, req, 200, "OK", "")
+			}
+		}
+	}
+}
+
+func (fp *fakePlatform) reply(to *net.UDPAddr, req SipMessage, code int, reason, wwwAuth string) {
+	resp := SipMessage{
+		StatusCode:      code,
+		Via:             req.Via,
+		From:            req.From,
+		To:              req.To,
+		CallID:          req.CallID,
+		CSeq:            req.CSeq,
+		WWWAuthenticate: wwwAuth,
+		Headers:         make(map[string]string),
+	}
+	_, _ = fp.conn.WriteToUDP(resp.Serialize(), to)
+}
+
+// TestServer_SelfHealsAfterKeepaliveRejection verifies the device
+// re-REGISTERs when the platform starts rejecting keepalives with 403
+// (NVR restarted and lost registration state) — issue #4.
+func TestServer_SelfHealsAfterKeepaliveRejection(t *testing.T) {
+	fp := newFakePlatform(t)
+	defer fp.close()
+
+	hub := h264.NewAUHub()
+	cfg := config.GB28181Config{
+		DeviceID:              "34020000001320000001",
+		ChannelID:             "34020000001320000001",
+		SIPDomain:             "3402000000",
+		Password:              "12345678",
+		LocalSIPPort:          0,
+		PlatformSIPAddress:    "127.0.0.1",
+		PlatformSIPPort:       fp.conn.LocalAddr().(*net.UDPAddr).Port,
+		RegisterIntervalSecs:  3600, // long — only the 403 path may trigger re-register
+		HeartbeatIntervalSecs: 1,
+		HeartbeatTimeoutCount: 3,
+	}
+	server := New(cfg, hub)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	go func() {
+		_ = server.Start(ctx)
+	}()
+
+	// Wait for the initial registration to complete.
+	deadline := time.Now().Add(5 * time.Second)
+	for fp.registers.Load() < 1 && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if got := fp.registers.Load(); got < 1 {
+		t.Fatalf("initial registration never completed (completed=%d)", got)
+	}
+
+	// Simulate NVR restart: platform forgets the device and 403s keepalives.
+	fp.rejectKA.Store(true)
+
+	// The device must re-REGISTER on its own shortly after the first 403.
+	deadline = time.Now().Add(6 * time.Second)
+	for fp.registers.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if got := fp.registers.Load(); got < 2 {
+		t.Fatalf("device did not re-register after keepalive 403 rejections (completed=%d)", got)
 	}
 }

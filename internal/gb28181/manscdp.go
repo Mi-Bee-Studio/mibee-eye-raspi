@@ -161,18 +161,18 @@ func DispatchInboundMessage(msg SipMessage) (SipMessage, *SipMessage, error) {
 		switch query.CmdType {
 		case "Catalog":
 			// Return 200 OK + queue Catalog response
-			ok200 := Build200OK(msg.RequestURI, msg.To, msg.From, msg.CallID, msg.CSeq, msg.Contact, "", "")
+			ok200 := Build200OK(msg, "", "")
 			catalogResp := BuildCatalogResponseMessage(query.SN, query.DeviceID, []ChannelItem{})
 			return ok200, &catalogResp, nil
 		case "DeviceInfo":
 			// Return 200 OK + queue DeviceInfo response
-			ok200 := Build200OK(msg.RequestURI, msg.To, msg.From, msg.CallID, msg.CSeq, msg.Contact, "", "")
+			ok200 := Build200OK(msg, "", "")
 			deviceInfo := DeviceItem{DeviceID: query.DeviceID, Name: "MiBee Eye", Manufacturer: "MiBee", Model: "Eye-RPi", Firmware: "1.0"}
 			deviceInfoResp := BuildDeviceInfoResponseMessage(query.SN, query.DeviceID, deviceInfo)
 			return ok200, &deviceInfoResp, nil
 		default:
 			slog.Warn("Unknown Query CmdType", "cmdtype", query.CmdType)
-			ok200 := Build200OK(msg.RequestURI, msg.To, msg.From, msg.CallID, msg.CSeq, msg.Contact, "", "")
+			ok200 := Build200OK(msg, "", "")
 			return ok200, nil, nil
 		}
 	}
@@ -183,17 +183,17 @@ func DispatchInboundMessage(msg SipMessage) (SipMessage, *SipMessage, error) {
 		switch notify.CmdType {
 		case "Keepalive":
 			// Keepalive ack from platform — just 200 OK, no queued response
-			ok200 := Build200OK(msg.RequestURI, msg.To, msg.From, msg.CallID, msg.CSeq, msg.Contact, "", "")
+			ok200 := Build200OK(msg, "", "")
 			return ok200, nil, nil
 		default:
 			slog.Warn("Unknown Notify CmdType", "cmdtype", notify.CmdType)
-			ok200 := Build200OK(msg.RequestURI, msg.To, msg.From, msg.CallID, msg.CSeq, msg.Contact, "", "")
+			ok200 := Build200OK(msg, "", "")
 			return ok200, nil, nil
 		}
 	}
 
 	// Unknown/unparseable body — log warning and return 200 OK (graceful degradation)
 	slog.Warn("Failed to parse MANSCDP XML body", "body", msg.Body)
-	ok200 := Build200OK(msg.RequestURI, msg.To, msg.From, msg.CallID, msg.CSeq, msg.Contact, "", "")
+	ok200 := Build200OK(msg, "", "")
 	return ok200, nil, nil
 }

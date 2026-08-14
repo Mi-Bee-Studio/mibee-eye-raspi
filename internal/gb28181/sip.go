@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // SipMessage represents a SIP message (request or response).
@@ -298,16 +299,27 @@ func BuildBye(requestUri, from, to, callId, cseq, contact string) SipMessage {
 	}
 }
 
-// Build200OK creates a 200 OK response.
-func Build200OK(requestUri, from, to, callId, cseq, contact, contentType, body string) SipMessage {
+// dialogTag is a stable To-tag suffix for this process. A single stable
+// tag is sufficient for a single-dialog GB28181 device.
+var dialogTag = fmt.Sprintf("mibee%d", time.Now().UnixNano()&0xFFFFFF)
+
+// Build200OK creates a 200 OK response to an incoming request.
+// Per RFC 3261 §8.2.6.2 it copies the request Via verbatim (required for
+// transaction matching — responses without Via are dropped by every SIP
+// stack), echoes From/To, appends a To tag if absent, and preserves
+// Call-ID/CSeq.
+func Build200OK(req SipMessage, contentType, body string) SipMessage {
+	to := req.To
+	if !strings.Contains(to, "tag=") {
+		to = to + ";tag=" + dialogTag
+	}
 	return SipMessage{
 		StatusCode:  200,
-		RequestURI:  requestUri,
-		From:        from,
+		Via:         req.Via,
+		From:        req.From,
 		To:          to,
-		CallID:      callId,
-		CSeq:        cseq,
-		Contact:     contact,
+		CallID:      req.CallID,
+		CSeq:        req.CSeq,
 		ContentType: contentType,
 		Body:        body,
 		UserAgent:   "MiBee-GB28181/1.0",

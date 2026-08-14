@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/config"
@@ -42,6 +43,16 @@ type Server struct {
 	sub         *h264.Subscriber
 	// Remote address for RTP streaming
 	remoteRTPAddr *net.UDPAddr
+	// regRespCh routes REGISTER responses from the recv loop to an active
+	// registration attempt (prevents both readers racing on sipConn).
+	regRespCh chan SipMessage
+	// reRegisterCh signals the lifecycle goroutine to re-register now
+	// (keepalive 401/403 rejection, send failures, periodic tick).
+	reRegisterCh chan struct{}
+	// regMu serializes registration attempts.
+	regMu sync.Mutex
+	// keepaliveFailures counts consecutive keepalive failures/errors.
+	keepaliveFailures atomic.Int32
 	// testMode skips REGISTER lifecycle for testing
 	testMode bool
 }
@@ -49,8 +60,10 @@ type Server struct {
 // New creates a new GB28181 server.
 func New(cfg config.GB28181Config, hub *h264.AUHub) *Server {
 	return &Server{
-		cfg: cfg,
-		hub: hub,
+		cfg:          cfg,
+		hub:          hub,
+		regRespCh:    make(chan SipMessage, 4),
+		reRegisterCh: make(chan struct{}, 1),
 	}
 }
 
@@ -81,10 +94,7 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}
 
-	// Keepalive failure counter (declared here for all modes)
-	keepaliveFailures := 0
-
-	// Spawn keepalive goroutine (skip in test mode)
+	// Keepalive + registration lifecycle (skip in test mode)
 	if !s.testMode {
 		heartbeatInterval := time.Duration(s.cfg.HeartbeatIntervalSecs) * time.Second
 		go func() {
@@ -96,18 +106,36 @@ func (s *Server) Start(ctx context.Context) error {
 					return
 				case <-ticker.C:
 					if err := s.sendKeepalive(ctx); err != nil {
-						keepaliveFailures++
-						slog.Warn("gb28181: keepalive failed", "error", err, "failures", keepaliveFailures)
-						if keepaliveFailures >= s.cfg.HeartbeatTimeoutCount {
+						failures := s.keepaliveFailures.Add(1)
+						slog.Warn("gb28181: keepalive send failed", "error", err, "failures", failures)
+						if failures >= int32(s.cfg.HeartbeatTimeoutCount) {
 							slog.Warn("gb28181: too many keepalive failures, re-registering")
-							if err := s.runRegisterLifecycle(ctx); err != nil {
-								slog.Error("gb28181: re-register failed", "error", err)
-							}
-							keepaliveFailures = 0
+							s.signalReRegister()
+							s.keepaliveFailures.Store(0)
 						}
-					} else {
-						keepaliveFailures = 0
 					}
+				}
+			}
+		}()
+
+		// Re-registration lifecycle: periodic refresh before Expires and
+		// immediate retry when the platform rejects us (401/403 keepalive —
+		// e.g. after an NVR restart that forgot our registration).
+		go func() {
+			registerInterval := time.Duration(s.cfg.RegisterIntervalSecs) * time.Second
+			ticker := time.NewTicker(registerInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					slog.Info("gb28181: periodic re-registration")
+				case <-s.reRegisterCh:
+					slog.Info("gb28181: re-registration triggered (keepalive rejected or failures)")
+				}
+				if err := s.reregister(ctx); err != nil {
+					slog.Warn("gb28181: re-register failed", "error", err)
 				}
 			}
 		}()
@@ -137,6 +165,14 @@ func (s *Server) Start(ctx context.Context) error {
 				continue
 			}
 
+			// Handle responses vs requests separately. Responses have
+			// StatusCode set and Method empty — the old switch never matched
+			// them (the "200" case was dead code).
+			if msg.StatusCode > 0 {
+				s.handleResponse(msg)
+				continue
+			}
+
 			// Handle based on method
 			switch msg.Method {
 			case "INVITE":
@@ -147,9 +183,6 @@ func (s *Server) Start(ctx context.Context) error {
 				s.handleMessage(ctx, msg, addr)
 			case "ACK":
 				// No action needed - media is now flowing
-			case "200":
-				// Response to our keepalive - reset failure counter
-				keepaliveFailures = 0
 			default:
 				slog.Debug("gb28181: unhandled SIP method", "method", msg.Method)
 			}
@@ -265,8 +298,95 @@ func getLocalIP(remoteAddr string) (string, error) {
 	return localAddr.IP.String(), nil
 }
 
-// runRegisterLifecycle performs the REGISTER authentication flow.
+// regResponseSource supplies REGISTER-flow responses: either direct socket
+// reads (initial registration, before the recv loop exists) or the
+// regRespCh channel fed by the recv loop (all later re-registrations —
+// prevents the recv loop and the register flow from racing on sipConn).
+type regResponseSource func(timeout time.Duration) (*SipMessage, error)
+
+// socketResponseSource reads responses directly from the SIP socket
+// (only safe before the recv loop starts).
+func (s *Server) socketResponseSource() regResponseSource {
+	return func(timeout time.Duration) (*SipMessage, error) {
+		buf := make([]byte, 4096)
+		_ = s.sipConn.SetReadDeadline(time.Now().Add(timeout))
+		n, _, err := s.sipConn.ReadFromUDP(buf)
+		_ = s.sipConn.SetReadDeadline(time.Time{})
+		if err != nil {
+			return nil, err
+		}
+		resp, err := Parse(buf[:n])
+		if err != nil {
+			return nil, err
+		}
+		return &resp, nil
+	}
+}
+
+// channelResponseSource reads responses routed by the recv loop.
+func (s *Server) channelResponseSource() regResponseSource {
+	return func(timeout time.Duration) (*SipMessage, error) {
+		select {
+		case resp := <-s.regRespCh:
+			return &resp, nil
+		case <-time.After(timeout):
+			return nil, fmt.Errorf("timeout waiting for REGISTER response")
+		}
+	}
+}
+
+// reregister runs the REGISTER lifecycle with responses routed through the
+// recv loop, serialized so concurrent triggers don't interleave.
+func (s *Server) reregister(ctx context.Context) error {
+	s.regMu.Lock()
+	defer s.regMu.Unlock()
+	return s.runRegisterLifecycleWith(ctx, s.channelResponseSource())
+}
+
+// signalReRegister nudges the lifecycle goroutine (non-blocking).
+func (s *Server) signalReRegister() {
+	select {
+	case s.reRegisterCh <- struct{}{}:
+	default:
+	}
+}
+
+// handleResponse processes a SIP response received by the recv loop.
+func (s *Server) handleResponse(msg SipMessage) {
+	// Route REGISTER responses to any active registration flow.
+	if strings.Contains(msg.CSeq, "REGISTER") {
+		select {
+		case s.regRespCh <- msg:
+		default:
+		}
+		return
+	}
+
+	switch msg.StatusCode {
+	case 200:
+		s.keepaliveFailures.Store(0)
+	case 401, 403, 404, 407:
+		// Platform no longer recognizes us (e.g. it restarted and lost
+		// registration state) — re-register immediately. This is the
+		// self-heal path for keepalive rejection.
+		failures := s.keepaliveFailures.Add(1)
+		slog.Warn("gb28181: request rejected by platform", "status", msg.StatusCode, "failures", failures)
+		s.signalReRegister()
+	default:
+		slog.Debug("gb28181: unhandled SIP response", "status", msg.StatusCode)
+	}
+}
+
+// runRegisterLifecycle performs the initial REGISTER authentication flow,
+// reading responses directly from the socket (the recv loop is not yet
+// running at this point).
 func (s *Server) runRegisterLifecycle(ctx context.Context) error {
+	return s.runRegisterLifecycleWith(ctx, s.socketResponseSource())
+}
+
+// runRegisterLifecycleWith performs the REGISTER authentication flow
+// using the given response source.
+func (s *Server) runRegisterLifecycleWith(ctx context.Context, nextResponse regResponseSource) error {
 	requestURI := fmt.Sprintf("sip:%s@%s", s.cfg.SIPDomain, s.cfg.SIPDomain)
 	from := fmt.Sprintf("<sip:%s@%s>", s.cfg.DeviceID, s.cfg.SIPDomain)
 	to := from
@@ -294,15 +414,10 @@ func (s *Server) runRegisterLifecycle(ctx context.Context) error {
 		return fmt.Errorf("sending REGISTER: %w", err)
 	}
 
-	// Wait for response
-	buf := make([]byte, 4096)
-	n, _, err := s.sipConn.ReadFromUDP(buf)
+	// Wait for response (5s)
+	resp, err := nextResponse(5 * time.Second)
 	if err != nil {
 		return fmt.Errorf("reading REGISTER response: %w", err)
-	}
-	resp, err := Parse(buf[:n])
-	if err != nil {
-		return fmt.Errorf("parsing REGISTER response: %w", err)
 	}
 
 	// Handle 401 Unauthorized
@@ -324,13 +439,9 @@ func (s *Server) runRegisterLifecycle(ctx context.Context) error {
 		}
 
 		// Wait for 200 OK
-		n, _, err = s.sipConn.ReadFromUDP(buf)
+		resp, err = nextResponse(5 * time.Second)
 		if err != nil {
 			return fmt.Errorf("reading 200 OK response: %w", err)
-		}
-		resp, err = Parse(buf[:n])
-		if err != nil {
-			return fmt.Errorf("parsing 200 OK response: %w", err)
 		}
 
 		if resp.StatusCode == 200 {
@@ -445,7 +556,7 @@ func (s *Server) handleInvite(ctx context.Context, msg SipMessage, fromAddr *net
 	deviceSDP := buildDeviceSDP(s.cfg.DeviceID, localIPAddr, localMediaPort, ssrc)
 
 	// Send 200 OK with SDP answer
-	ok200 := Build200OK(msg.RequestURI, msg.To, msg.From, msg.CallID, msg.CSeq, msg.Contact, "application/sdp", deviceSDP)
+	ok200 := Build200OK(msg, "application/sdp", deviceSDP)
 	if _, err := s.sipConn.WriteToUDP(ok200.Serialize(), fromAddr); err != nil {
 		slog.Warn("gb28181: failed to send 200 OK", "error", err)
 		return
@@ -518,7 +629,7 @@ func (s *Server) handleBye(ctx context.Context, msg SipMessage, fromAddr *net.UD
 	s.mu.Unlock()
 
 	// Send 200 OK to BYE
-	ok200 := Build200OK(msg.RequestURI, msg.To, msg.From, msg.CallID, msg.CSeq, msg.Contact, "", "")
+	ok200 := Build200OK(msg, "", "")
 	if _, err := s.sipConn.WriteToUDP(ok200.Serialize(), fromAddr); err != nil {
 		slog.Warn("gb28181: failed to send 200 OK to BYE", "error", err)
 	}
@@ -537,17 +648,17 @@ func (s *Server) handleMessage(ctx context.Context, msg SipMessage, fromAddr *ne
 	if _, err := s.sipConn.WriteToUDP(ok200.Serialize(), fromAddr); err != nil {
 		slog.Warn("gb28181: failed to send 200 OK to MESSAGE", "error", err)
 	}
-	if _, err := s.sipConn.WriteToUDP(ok200.Serialize(), fromAddr); err != nil {
-		slog.Warn("gb28181: failed to send 200 OK to MESSAGE", "error", err)
-	}
 
 	// Send queued response if any
 	if queuedResp != nil {
+		// Fresh routing headers for this new MESSAGE request (the queued body
+		// only carries MANSCDP XML — Via/CSeq/Max-Forwards are mandatory).
 		queuedResp.RequestURI = fmt.Sprintf("sip:%s@%s", s.cfg.SIPDomain, s.cfg.SIPDomain)
-		queuedResp.From = msg.To
-		queuedResp.To = msg.From
-		queuedResp.CallID = msg.CallID
-		queuedResp.Contact = msg.Contact
+		queuedResp.From = fmt.Sprintf("<sip:%s@%s>", s.cfg.DeviceID, s.cfg.SIPDomain)
+		queuedResp.To = fmt.Sprintf("<sip:%s@%s>", s.cfg.SIPDomain, s.cfg.SIPDomain)
+		queuedResp.CallID = fmt.Sprintf("%d-resp@%s", time.Now().Unix(), s.cfg.DeviceID)
+		queuedResp.Via = fmt.Sprintf("SIP/2.0/UDP %s:%d;rport;branch=z9hG4bK%016x", localIP(), s.cfg.LocalSIPPort, time.Now().UnixNano())
+		queuedResp.MaxForwards = "70"
 		queuedResp.CSeq = "2 MESSAGE"
 		if _, err := s.sipConn.WriteToUDP(queuedResp.Serialize(), fromAddr); err != nil {
 			slog.Warn("gb28181: failed to send queued MESSAGE response", "error", err)

@@ -294,24 +294,48 @@ func TestSipParse(t *testing.T) {
 	}
 }
 
-// TestBuild200OK tests building a 200 OK response.
+// TestBuild200OK tests building a 200 OK response from a request.
 func TestBuild200OK(t *testing.T) {
-	msg := Build200OK(
-		"sip:3402000000@3402000000",
-		"<sip:34020000012000000001@3402000000>;tag=12345",
-		"<sip:3402000000@3402000000>;tag=67890",
-		"1234567890@192.168.1.100",
-		"1 REGISTER",
-		"<sip:34020000012000000001@192.168.1.100:5060>",
-		"application/sdp",
-		"v=0\r\no=- 12345 12345 IN IP4 192.168.1.100\r\ns=GB28181\r\nc=IN IP4 192.168.1.100\r\n",
-	)
+	req := SipMessage{
+		Method:     "INVITE",
+		RequestURI: "sip:34020000001320000001@3402000000",
+		From:       "<sip:34020000012000000001@3402000000>;tag=12345",
+		To:         "<sip:34020000001320000001@3402000000>",
+		CallID:     "1234567890@192.168.1.100",
+		CSeq:       "1 INVITE",
+		Via:        "SIP/2.0/UDP 192.168.1.100:5060;rport;branch=z9hG4bK-abc123",
+		Headers:    make(map[string]string),
+	}
+	msg := Build200OK(req, "application/sdp", "v=0\r\no=- 12345 12345 IN IP4 192.168.1.100\r\ns=GB28181\r\nc=IN IP4 192.168.1.100\r\n")
 
 	data := msg.Serialize()
 
 	// Check status line
 	if !strings.Contains(string(data), "SIP/2.0 200 OK") {
 		t.Error("200 OK response missing 'SIP/2.0 200 OK'")
+	}
+
+	// Via MUST be copied verbatim from the request (transaction matching)
+	if !strings.Contains(string(data), "Via: SIP/2.0/UDP 192.168.1.100:5060;rport;branch=z9hG4bK-abc123") {
+		t.Error("200 OK response missing Via copied from request")
+	}
+
+	// From MUST echo the request From (platform), not be swapped
+	if !strings.Contains(string(data), "From: <sip:34020000012000000001@3402000000>;tag=12345") {
+		t.Error("200 OK response From must echo request From")
+	}
+
+	// To MUST echo the request To with a tag appended
+	if !strings.Contains(string(data), "To: <sip:34020000001320000001@3402000000>;tag=") {
+		t.Error("200 OK response missing To tag")
+	}
+
+	// Call-ID and CSeq preserved
+	if !strings.Contains(string(data), "Call-ID: 1234567890@192.168.1.100") {
+		t.Error("200 OK response missing Call-ID")
+	}
+	if !strings.Contains(string(data), "CSeq: 1 INVITE") {
+		t.Error("200 OK response missing CSeq")
 	}
 
 	// Check body presence
