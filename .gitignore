@@ -36,3 +36,6 @@ AGENTS.md
 .mimocode/
 docs/blog/
 docs/handoff/
+
+# Temporary files (safe to rm -rf)
+tmp/
