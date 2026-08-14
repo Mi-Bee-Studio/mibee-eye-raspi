@@ -2,6 +2,7 @@ package gb28181
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"sync"
 	"testing"
@@ -555,4 +556,134 @@ func contains(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// TestParseSDP_ExtractsMediaAddressAndSSRC verifies parseSDP returns the
+// RTP destination (c= IP + m=video port) and SSRC (y=) from INVITE SDP.
+func TestParseSDP_ExtractsMediaAddressAndSSRC(t *testing.T) {
+	sdp := `v=0
+o=- 0 0 IN IP4 192.168.1.100
+s=Play
+c=IN IP4 192.168.1.100
+t=0 0
+m=video 60000 RTP/AVP 96
+a=rtpmap:96 PS/90000
+a=recvonly
+y=0100000001`
+
+	addr, ssrc, err := parseSDP(sdp)
+	if err != nil {
+		t.Fatalf("parseSDP failed: %v", err)
+	}
+	if addr != "192.168.1.100:60000" {
+		t.Errorf("expected media addr 192.168.1.100:60000, got %s", addr)
+	}
+	if ssrc != 100000001 {
+		t.Errorf("expected SSRC 100000001, got %d", ssrc)
+	}
+}
+
+// TestParseSDP_RejectsMissingMediaLines verifies SDP without c=/m= lines
+// is rejected — the device must never fall back to the SIP peer address as
+// RTP destination (it would flood the platform's signaling port).
+func TestParseSDP_RejectsMissingMediaLines(t *testing.T) {
+	sdp := "v=0\ns=Play\ny=0100000001\n"
+	if _, _, err := parseSDP(sdp); err == nil {
+		t.Error("expected error for SDP missing c=/m= lines, got nil")
+	}
+}
+
+// TestServer_SendsRtpToSdpAddressNotSipPeer verifies that after INVITE,
+// RTP media flows to the address in the SDP c=/m= lines — NOT to the SIP
+// peer that sent the INVITE (regression: media used to flood the NVR's
+// SIP port 5060).
+func TestServer_SendsRtpToSdpAddressNotSipPeer(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	hub := h264.NewAUHub()
+	cfg := config.GB28181Config{
+		DeviceID:              "34020000001320000001",
+		ChannelID:             "34020000001320000001",
+		SIPDomain:             "3402000000",
+		Password:              "12345678",
+		LocalSIPPort:          0,
+		PlatformSIPAddress:    "127.0.0.1",
+		PlatformSIPPort:       15065,
+		RegisterIntervalSecs:  60,
+		HeartbeatIntervalSecs: 60,
+		HeartbeatTimeoutCount: 3,
+	}
+	server := New(cfg, hub)
+	server.SetTestMode()
+
+	go func() {
+		_ = server.Start(ctx)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	sipPort := server.sipConn.LocalAddr().(*net.UDPAddr).Port
+
+	// Bind the "platform media" socket the SDP will point to.
+	mediaSock, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatalf("failed to bind media socket: %v", err)
+	}
+	defer mediaSock.Close()
+	mediaPort := mediaSock.LocalAddr().(*net.UDPAddr).Port
+
+	// INVITE with SDP pointing at mediaSock, sent from a different socket (the SIP peer).
+	sdp := fmt.Sprintf("v=0\no=- 0 0 IN IP4 127.0.0.1\ns=Play\nc=IN IP4 127.0.0.1\nt=0 0\nm=video %d RTP/AVP 96\na=rtpmap:96 PS/90000\na=recvonly\ny=0100000001", mediaPort)
+	invite := buildInvite("test-call-rtp@example.com",
+		"<sip:34020000012000000001@3402000000>;tag=44444",
+		"<sip:34020000001320000001@3402000000>",
+		"<sip:34020000012000000001@127.0.0.1:5060>")
+	invite.Body = sdp
+
+	clientConn, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: sipPort})
+	if err != nil {
+		t.Fatalf("failed to dial server: %v", err)
+	}
+	defer clientConn.Close()
+
+	if _, err := clientConn.Write(invite.Serialize()); err != nil {
+		t.Fatalf("failed to send INVITE: %v", err)
+	}
+
+	// Wait for subscribe + media goroutine, then push one AU through the hub.
+	time.Sleep(200 * time.Millisecond)
+	if count := hub.SubscriberCount(); count != 1 {
+		t.Fatalf("expected 1 subscriber after INVITE, got %d", count)
+	}
+	hub.Write(h264.AccessUnit{
+		NALUs:     []h264.NALU{{Type: 5, Data: []byte{0x65, 0x11, 0x22, 0x33}, IsIDR: true}},
+		Timestamp: time.Now(),
+		KeyFrame:  true,
+	})
+
+	// RTP must arrive at the SDP media address (mediaSock).
+	mediaSock.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 2048)
+	n, _, err := mediaSock.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("no RTP received at SDP media address: %v", err)
+	}
+	if n < 12 || buf[0]>>6 != 2 {
+		t.Fatalf("received packet is not RTP v2 (len=%d, first byte=0x%02x)", n, buf[0])
+	}
+
+	// SIP peer socket must NOT receive RTP (drain whatever is pending).
+	clientConn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	sipBuf := make([]byte, 2048)
+	for {
+		n, _, err := clientConn.ReadFromUDP(sipBuf)
+		if err != nil {
+			break // timeout — nothing else arriving, good
+		}
+		if n >= 12 && sipBuf[0]>>6 == 2 && sipBuf[1]&0x7f == 96 {
+			t.Fatal("RTP media leaked to SIP peer socket")
+		}
+	}
+
+	t.Logf("RTP arrived at SDP media address 127.0.0.1:%d (%d bytes)", mediaPort, n)
 }

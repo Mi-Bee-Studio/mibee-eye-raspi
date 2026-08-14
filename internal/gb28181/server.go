@@ -173,10 +173,12 @@ func (s *Server) Stop() {
 	}
 }
 
-// parseSDP extracts media address and SSRC from SDP body.
-// Returns (mediaAddr, ssrc, err).
+// parseSDP extracts the RTP media destination and SSRC from the INVITE SDP body.
+// The destination IP comes from the c= line and the port from the m=video line.
+// Returns (mediaAddr "ip:port", ssrc, err).
 func parseSDP(body string) (string, uint32, error) {
-	var mediaAddr string
+	var mediaIP string
+	var mediaPort int
 	var ssrc uint32
 	var ssrcFound bool
 
@@ -187,7 +189,17 @@ func parseSDP(body string) (string, uint32, error) {
 			// Connection: c=IN IP4 <address>
 			parts := strings.Fields(line)
 			if len(parts) >= 3 {
-				mediaAddr = parts[2]
+				mediaIP = parts[2]
+			}
+		} else if strings.HasPrefix(line, "m=video ") {
+			// Media: m=video <port> RTP/AVP 96
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				port, err := strconv.Atoi(parts[1])
+				if err != nil {
+					return "", 0, fmt.Errorf("invalid media port in m= line: %s: %w", parts[1], err)
+				}
+				mediaPort = port
 			}
 		} else if strings.HasPrefix(line, "y=") {
 			// SSRC: y=<10-digit decimal>
@@ -204,8 +216,11 @@ func parseSDP(body string) (string, uint32, error) {
 	if !ssrcFound {
 		return "", 0, fmt.Errorf("SDP missing y= SSRC line")
 	}
+	if mediaIP == "" || mediaPort == 0 {
+		return "", 0, fmt.Errorf("SDP missing c= media IP or m=video media port")
+	}
 
-	return mediaAddr, ssrc, nil
+	return net.JoinHostPort(mediaIP, strconv.Itoa(mediaPort)), ssrc, nil
 }
 
 // buildDeviceSDP builds the device SDP answer for INVITE 200 OK.
@@ -373,13 +388,20 @@ func (s *Server) sendKeepalive(ctx context.Context) error {
 func (s *Server) handleInvite(ctx context.Context, msg SipMessage, fromAddr *net.UDPAddr) {
 	slog.Info("gb28181: received INVITE", "from", fromAddr.String())
 
-	// Parse SDP for SSRC
-	_, ssrc, err := parseSDP(msg.Body)
+	// Parse SDP for RTP destination and SSRC — the media address comes from the
+	// SDP c=/m= lines, NEVER from the SIP peer address (streaming to the SIP
+	// port floods the platform's signaling socket).
+	mediaAddr, ssrc, err := parseSDP(msg.Body)
 	if err != nil {
 		slog.Warn("gb28181: failed to parse INVITE SDP", "error", err)
 		return
 	}
-	slog.Info("gb28181: parsed SSRC from INVITE", "ssrc", ssrc)
+	rtpDest, err := net.ResolveUDPAddr("udp", mediaAddr)
+	if err != nil {
+		slog.Warn("gb28181: invalid RTP destination from INVITE SDP", "addr", mediaAddr, "error", err)
+		return
+	}
+	slog.Info("gb28181: parsed SSRC and RTP destination from INVITE", "ssrc", ssrc, "rtp_dest", rtpDest.String())
 
 	// Bind local media UDP on ephemeral port
 	mediaConn, err := net.ListenUDP("udp", nil)
@@ -394,8 +416,13 @@ func (s *Server) handleInvite(ctx context.Context, msg SipMessage, fromAddr *net
 	s.mediaConn = mediaConn
 	s.mu.Unlock()
 
-	// Build device SDP answer
-	localIPAddr := localIP()
+	// Build device SDP answer — use the real source IP toward the platform,
+	// not an interface scan (wrong on multihomed hosts).
+	localIPAddr, err := getLocalIP(fromAddr.String())
+	if err != nil {
+		slog.Warn("gb28181: failed to determine local IP, falling back to interface scan", "error", err)
+		localIPAddr = localIP()
+	}
 	deviceSDP := buildDeviceSDP(s.cfg.DeviceID, localIPAddr, localMediaPort, ssrc)
 
 	// Send 200 OK with SDP answer
@@ -409,7 +436,7 @@ func (s *Server) handleInvite(ctx context.Context, msg SipMessage, fromAddr *net
 	sub := s.hub.Subscribe(ctx)
 	s.mu.Lock()
 	s.sub = sub
-	s.remoteRTPAddr = fromAddr
+	s.remoteRTPAddr = rtpDest
 	s.mu.Unlock()
 	slog.Info("gb28181: subscribed to AUHub", "sub_id", sub.ID)
 
@@ -422,8 +449,8 @@ func (s *Server) handleInvite(ctx context.Context, msg SipMessage, fromAddr *net
 	// Spawn goroutine draining AU + PS mux + RTP push
 	go func() {
 		defer mediaCancel()
-		pusher := NewRtpPusher(mediaConn, fromAddr)
-		slog.Info("gb28181: media goroutine started", "remote", fromAddr.String())
+		pusher := NewRtpPusher(mediaConn, rtpDest)
+		slog.Info("gb28181: media goroutine started", "remote", rtpDest.String())
 
 		for {
 			select {
