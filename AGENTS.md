@@ -211,3 +211,7 @@ on the other end.
   instead. Config: `camera.mode: "rpicamvid"`. No custom dependencies,
   uses stock libcamera stack.
 - **Files**: `internal/camera/params.go` (mode enum), `internal/camera/rpicamvid.go` (new implementation), `cmd/server/main.go` (mode switch)
+
+## Issue tracking
+
+This repo's GitHub (https://github.com/Mi-Bee-Studio/mibee-eye-raspi/issues) is the **central issue tracker for BOTH Pi camera projects** — Go (`rpi3b-cam`) and Rust (`mibee-eye-raspi-rs`). NVR team files all discovered interop bugs here. Do not split issues across repos.
