@@ -17,6 +17,7 @@ type Query struct {
 	SN       string   `xml:"SN,attr"`
 	DeviceID string   `xml:"DeviceID"`
 }
+
 // QueryElem represents a MANSCDP Query request with child-element format (for NVR compatibility).
 type QueryElem struct {
 	XMLName  xml.Name `xml:"Query"`
@@ -81,6 +82,7 @@ type Notify struct {
 	DeviceID string   `xml:"DeviceID"`
 	Status   string   `xml:"Status,omitempty"`
 }
+
 // NotifyElem represents a MANSCDP Notify message with child-element format (for NVR compatibility).
 type NotifyElem struct {
 	XMLName  xml.Name `xml:"Notify"`
@@ -89,6 +91,7 @@ type NotifyElem struct {
 	DeviceID string   `xml:"DeviceID"`
 	Status   string   `xml:"Status,omitempty"`
 }
+
 // parseQueryDual tries to parse a Query body in both attribute and child-element format.
 // Returns the normalized Query struct and a bool indicating success.
 func parseQueryDual(body string) (Query, bool) {
@@ -109,6 +112,7 @@ func parseQueryDual(body string) (Query, bool) {
 	}
 	return Query{}, false
 }
+
 // parseNotifyDual tries to parse a Notify body in both attribute and child-element format.
 // Returns the normalized Notify struct and a bool indicating success.
 func parseNotifyDual(body string) (Notify, bool) {
@@ -130,6 +134,7 @@ func parseNotifyDual(body string) (Notify, bool) {
 	}
 	return Notify{}, false
 }
+
 // DeviceContext provides device identity and network context for MANSCDP responses.
 type DeviceContext struct {
 	DeviceID     string
@@ -141,6 +146,7 @@ type DeviceContext struct {
 	LocalIP      string
 	LocalPort    int
 }
+
 // buildChannel creates a ChannelItem from DeviceContext.
 func buildChannel(dev DeviceContext) ChannelItem {
 	return ChannelItem{
@@ -231,15 +237,16 @@ func BuildKeepaliveMessage(sn, deviceID, status string) SipMessage {
 		Headers:     make(map[string]string),
 	}
 }
+
 // BuildRecordInfoResponseMessage creates a SIP MESSAGE with RecordInfo response (empty, no recordings).
 func BuildRecordInfoResponseMessage(sn, deviceID string) SipMessage {
 	type RecordInfoResponse struct {
-		XMLName  xml.Name `xml:"Response"`
-		CmdType  string   `xml:"CmdType,attr"`
-		SN       string   `xml:"SN,attr"`
-		DeviceID string   `xml:"DeviceID"`
-		Name     string   `xml:"Name"`
-		SumNum   *int     `xml:"SumNum"`
+		XMLName    xml.Name `xml:"Response"`
+		CmdType    string   `xml:"CmdType,attr"`
+		SN         string   `xml:"SN,attr"`
+		DeviceID   string   `xml:"DeviceID"`
+		Name       string   `xml:"Name"`
+		SumNum     *int     `xml:"SumNum"`
 		RecordList struct {
 			Num int `xml:"Num,attr"`
 		} `xml:"RecordList"`
@@ -268,6 +275,7 @@ func BuildRecordInfoResponseMessage(sn, deviceID string) SipMessage {
 		Headers:     make(map[string]string),
 	}
 }
+
 // BuildDeviceStatusResponseMessage creates a SIP MESSAGE with DeviceStatus response.
 func BuildDeviceStatusResponseMessage(sn, deviceID string) SipMessage {
 	body := fmt.Sprintf(`<Response CmdType="DeviceStatus" SN="%s"><DeviceID>%s</DeviceID><Result>OK</Result><Online>ONLINE</Online><Status>OK</Status><Encode>ON</Encode><Record>OFF</Record><DeviceTime>%s</DeviceTime></Response>`, sn, deviceID, time.Now().Format("2006-01-02T15:04:05"))
@@ -279,6 +287,7 @@ func BuildDeviceStatusResponseMessage(sn, deviceID string) SipMessage {
 		Headers:     make(map[string]string),
 	}
 }
+
 // BuildControlRejectResponseMessage creates a SIP MESSAGE with control rejection response.
 func BuildControlRejectResponseMessage(cmdType, sn, deviceID string) SipMessage {
 	body := fmt.Sprintf(`<Response CmdType="%s" SN="%s"><DeviceID>%s</DeviceID><Result>ERROR</Result></Response>`, cmdType, sn, deviceID)
