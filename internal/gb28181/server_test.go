@@ -76,7 +76,7 @@ func TestServer_AttachesSubscriberOnInvite(t *testing.T) {
 		HeartbeatIntervalSecs: 60,
 		HeartbeatTimeoutCount: 3,
 	}
-	server := New(cfg, hub)
+	server := New(cfg, config.DeviceConfig{}, hub)
 	server.SetTestMode()
 
 	// Start server in goroutine
@@ -173,7 +173,7 @@ func TestServer_Sends200OKBeforeMedia(t *testing.T) {
 		HeartbeatIntervalSecs: 60,
 		HeartbeatTimeoutCount: 3,
 	}
-	server := New(cfg, hub)
+	server := New(cfg, config.DeviceConfig{}, hub)
 	server.SetTestMode()
 
 	serverErr := make(chan error, 1)
@@ -285,7 +285,7 @@ func TestServer_200OK_ContainsDeviceSDP(t *testing.T) {
 		HeartbeatIntervalSecs: 60,
 		HeartbeatTimeoutCount: 3,
 	}
-	server := New(cfg, hub)
+	server := New(cfg, config.DeviceConfig{}, hub)
 	server.SetTestMode()
 
 	serverErr := make(chan error, 1)
@@ -380,7 +380,7 @@ func TestServer_EchoesSSRC(t *testing.T) {
 		HeartbeatIntervalSecs: 60,
 		HeartbeatTimeoutCount: 3,
 	}
-	server := New(cfg, hub)
+	server := New(cfg, config.DeviceConfig{}, hub)
 	server.SetTestMode()
 
 	serverErr := make(chan error, 1)
@@ -462,7 +462,7 @@ func TestServer_ByeCleansUpSubscriberAndSocket(t *testing.T) {
 		HeartbeatIntervalSecs: 60,
 		HeartbeatTimeoutCount: 3,
 	}
-	server := New(cfg, hub)
+	server := New(cfg, config.DeviceConfig{}, hub)
 	server.SetTestMode()
 
 	serverErr := make(chan error, 1)
@@ -615,7 +615,7 @@ func TestServer_SendsRtpToSdpAddressNotSipPeer(t *testing.T) {
 		HeartbeatIntervalSecs: 60,
 		HeartbeatTimeoutCount: 3,
 	}
-	server := New(cfg, hub)
+	server := New(cfg, config.DeviceConfig{}, hub)
 	server.SetTestMode()
 
 	go func() {
@@ -710,7 +710,7 @@ func TestServer_ReInviteReplacesPreviousSession(t *testing.T) {
 		HeartbeatIntervalSecs: 60,
 		HeartbeatTimeoutCount: 3,
 	}
-	server := New(cfg, hub)
+	server := New(cfg, config.DeviceConfig{}, hub)
 	server.SetTestMode()
 
 	go func() {
@@ -802,8 +802,8 @@ func TestServer_ReInviteReplacesPreviousSession(t *testing.T) {
 // to reject keepalive MESSAGEs with 403 (simulating an NVR restart that
 // lost registration state).
 type fakePlatform struct {
-	conn    *net.UDPConn
-	rejectKA atomic.Bool
+	conn      *net.UDPConn
+	rejectKA  atomic.Bool
 	registers atomic.Int32 // REGISTERs carrying Authorization (completed flows)
 }
 
@@ -887,7 +887,7 @@ func TestServer_SelfHealsAfterKeepaliveRejection(t *testing.T) {
 		HeartbeatIntervalSecs: 1,
 		HeartbeatTimeoutCount: 3,
 	}
-	server := New(cfg, hub)
+	server := New(cfg, config.DeviceConfig{}, hub)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -914,5 +914,84 @@ func TestServer_SelfHealsAfterKeepaliveRejection(t *testing.T) {
 	}
 	if got := fp.registers.Load(); got < 2 {
 		t.Fatalf("device did not re-register after keepalive 403 rejections (completed=%d)", got)
+	}
+}
+
+// TestRecvLoop_Subscribe_Gets200 verifies the recv loop answers SUBSCRIBE with 200 OK.
+func TestRecvLoop_Subscribe_Gets200(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	hub := h264.NewAUHub()
+	cfg := config.GB28181Config{
+		DeviceID:              "34020000001320000001",
+		ChannelID:             "34020000001320000001",
+		SIPDomain:             "3402000000",
+		Password:              "12345678",
+		LocalSIPPort:          0,
+		PlatformSIPAddress:    "127.0.0.1",
+		PlatformSIPPort:       15067,
+		RegisterIntervalSecs:  60,
+		HeartbeatIntervalSecs: 60,
+		HeartbeatTimeoutCount: 3,
+	}
+	server := New(cfg, config.DeviceConfig{}, hub)
+	server.SetTestMode()
+
+	serverErr := make(chan error, 1)
+	go func() {
+		if err := server.Start(ctx); err != nil && err != context.Canceled {
+			serverErr <- err
+		}
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	sipPort := server.sipConn.LocalAddr().(*net.UDPAddr).Port
+
+	subscribe := SipMessage{
+		Method:     "SUBSCRIBE",
+		RequestURI: "sip:3402000000@3402000000",
+		From:       "<sip:34020000012000000001@3402000000>;tag=sub123",
+		To:         "<sip:34020000001320000001@3402000000>",
+		CallID:     "test-call-subscribe@example.com",
+		CSeq:       "1 SUBSCRIBE",
+		Contact:    "<sip:34020000012000000001@192.168.1.100:5060>",
+		Via:        "SIP/2.0/UDP 192.168.1.100:5060;rport;branch=z9hG4bK-subscribe",
+		Expires:    "3600",
+		Headers:    make(map[string]string),
+	}
+
+	clientConn, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: sipPort})
+	if err != nil {
+		t.Fatalf("Failed to dial server: %v", err)
+	}
+	defer clientConn.Close()
+
+	if _, err := clientConn.Write(subscribe.Serialize()); err != nil {
+		t.Fatalf("Failed to send SUBSCRIBE: %v", err)
+	}
+
+	respBuf := make([]byte, 4096)
+	clientConn.SetReadDeadline(time.Now().Add(1 * time.Second))
+	n, _, err := clientConn.ReadFromUDP(respBuf)
+	if err != nil {
+		t.Fatalf("Failed to read 200 OK: %v", err)
+	}
+
+	resp, err := Parse(respBuf[:n])
+	if err != nil {
+		t.Fatalf("Failed to parse 200 OK: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("Expected 200 OK, got %d", resp.StatusCode)
+	}
+
+	cancel()
+	select {
+	case err := <-serverErr:
+		if err != nil {
+			t.Fatalf("Server error: %v", err)
+		}
+	case <-time.After(1 * time.Second):
 	}
 }

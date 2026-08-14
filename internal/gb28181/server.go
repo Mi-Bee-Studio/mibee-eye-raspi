@@ -30,10 +30,9 @@ import (
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/h264"
 )
 
-// Server implements the GB/T 28181 SIP server lifecycle.
-// Manages SIP signaling, digest authentication, keepalive, and media streaming.
 type Server struct {
 	cfg         config.GB28181Config
+	deviceCfg   config.DeviceConfig
 	hub         *h264.AUHub
 	sipConn     *net.UDPConn
 	mediaConn   *net.UDPConn
@@ -55,17 +54,22 @@ type Server struct {
 	keepaliveFailures atomic.Int32
 	// testMode skips REGISTER lifecycle for testing
 	testMode bool
+	// devContext holds device identity for MANSCDP responses
+	devCtx DeviceContext
 }
 
 // New creates a new GB28181 server.
-func New(cfg config.GB28181Config, hub *h264.AUHub) *Server {
+func New(cfg config.GB28181Config, deviceCfg config.DeviceConfig, hub *h264.AUHub) *Server {
 	return &Server{
 		cfg:          cfg,
+		deviceCfg:    deviceCfg,
 		hub:          hub,
 		regRespCh:    make(chan SipMessage, 4),
 		reRegisterCh: make(chan struct{}, 1),
 	}
 }
+
+
 
 // SetTestMode enables test mode which skips REGISTER lifecycle.
 func (s *Server) SetTestMode() {
@@ -81,6 +85,19 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("binding SIP UDP on port %d: %w", s.cfg.LocalSIPPort, err)
 	}
 	s.sipConn = sipConn
+	slog.Info("gb28181: SIP UDP listener started", "port", s.cfg.LocalSIPPort)
+	
+	// Initialize device context for MANSCDP responses
+	s.devCtx = DeviceContext{
+		DeviceID:     s.cfg.DeviceID,
+		ChannelID:    s.cfg.ChannelID,
+		Name:         s.deviceCfg.Name,
+		Manufacturer: s.deviceCfg.Manufacturer,
+		Model:        s.deviceCfg.Model,
+		Firmware:     s.deviceCfg.Firmware,
+		LocalIP:      localIP(),
+		LocalPort:    s.cfg.LocalSIPPort,
+	}
 	slog.Info("gb28181: SIP UDP listener started", "port", s.cfg.LocalSIPPort)
 
 	// Create child context with cancel for lifecycle management
@@ -183,6 +200,12 @@ func (s *Server) Start(ctx context.Context) error {
 				s.handleMessage(ctx, msg, addr)
 			case "ACK":
 				// No action needed - media is now flowing
+			case "SUBSCRIBE", "NOTIFY", "INFO", "OPTIONS":
+				slog.Info("gb28181: received method, responding 200 OK", "method", msg.Method, "from", addr.String())
+				ok200 := Build200OK(msg, "", "")
+				if _, err := s.sipConn.WriteToUDP(ok200.Serialize(), addr); err != nil {
+					slog.Warn("gb28181: failed to send 200 OK", "method", msg.Method, "error", err)
+				}
 			default:
 				slog.Debug("gb28181: unhandled SIP method", "method", msg.Method)
 			}
@@ -638,7 +661,7 @@ func (s *Server) handleBye(ctx context.Context, msg SipMessage, fromAddr *net.UD
 
 // handleMessage handles MESSAGE requests - dispatch MANSCDP XML, send 200 OK, and any queued response.
 func (s *Server) handleMessage(ctx context.Context, msg SipMessage, fromAddr *net.UDPAddr) {
-	ok200, queuedResp, err := DispatchInboundMessage(msg)
+	ok200, queuedResp, err := DispatchInboundMessage(msg, s.devCtx)
 	if err != nil {
 		slog.Warn("gb28181: failed to dispatch MESSAGE", "error", err)
 		return
