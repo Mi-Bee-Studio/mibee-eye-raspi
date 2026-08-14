@@ -74,19 +74,24 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 			"username": s.username,
 			"password": maskPassword(s.password),
 		},
-		"gb28181": map[string]interface{}{
-			"enabled":                 s.cfg.GB28181Config.Enabled,
-			"platform_sip_address":    s.cfg.GB28181Config.PlatformSIPAddress,
-			"platform_sip_port":       s.cfg.GB28181Config.PlatformSIPPort,
-			"device_id":               s.cfg.GB28181Config.DeviceID,
-			"channel_id":              s.cfg.GB28181Config.ChannelID,
-			"sip_domain":              s.cfg.GB28181Config.SIPDomain,
-			"password":                maskPassword(s.cfg.GB28181Config.Password),
-			"local_sip_port":          s.cfg.GB28181Config.LocalSIPPort,
-			"register_interval_secs":  s.cfg.GB28181Config.RegisterIntervalSecs,
-			"heartbeat_interval_secs": s.cfg.GB28181Config.HeartbeatIntervalSecs,
-			"heartbeat_timeout_count": s.cfg.GB28181Config.HeartbeatTimeoutCount,
-		},
+		"gb28181": func() map[string]interface{} {
+			if s.cfg.GB28181Config == nil {
+				return map[string]interface{}{"enabled": false}
+			}
+			return map[string]interface{}{
+				"enabled":                 s.cfg.GB28181Config.Enabled,
+				"platform_sip_address":    s.cfg.GB28181Config.PlatformSIPAddress,
+				"platform_sip_port":       s.cfg.GB28181Config.PlatformSIPPort,
+				"device_id":               s.cfg.GB28181Config.DeviceID,
+				"channel_id":              s.cfg.GB28181Config.ChannelID,
+				"sip_domain":              s.cfg.GB28181Config.SIPDomain,
+				"password":                maskPassword(s.cfg.GB28181Config.Password),
+				"local_sip_port":          s.cfg.GB28181Config.LocalSIPPort,
+				"register_interval_secs":  s.cfg.GB28181Config.RegisterIntervalSecs,
+				"heartbeat_interval_secs": s.cfg.GB28181Config.HeartbeatIntervalSecs,
+				"heartbeat_timeout_count": s.cfg.GB28181Config.HeartbeatTimeoutCount,
+			}
+		}(),
 	}
 
 	writeJSON(w, http.StatusOK, config)
