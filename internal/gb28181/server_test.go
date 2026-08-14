@@ -742,7 +742,8 @@ func TestServer_ReInviteReplacesPreviousSession(t *testing.T) {
 	}
 	defer sockA.Close()
 	portA := sockA.LocalAddr().(*net.UDPAddr).Port
-	if _, err := clientConn.Write(buildSdpInvite(portA).Serialize()); err != nil {
+	invA := buildSdpInvite(portA)
+	if _, err := clientConn.Write(invA.Serialize()); err != nil {
 		t.Fatalf("send INVITE 1: %v", err)
 	}
 	time.Sleep(200 * time.Millisecond)
@@ -757,7 +758,8 @@ func TestServer_ReInviteReplacesPreviousSession(t *testing.T) {
 	}
 	defer sockB.Close()
 	portB := sockB.LocalAddr().(*net.UDPAddr).Port
-	if _, err := clientConn.Write(buildSdpInvite(portB).Serialize()); err != nil {
+	invB := buildSdpInvite(portB)
+	if _, err := clientConn.Write(invB.Serialize()); err != nil {
 		t.Fatalf("send INVITE 2: %v", err)
 	}
 	time.Sleep(200 * time.Millisecond)
