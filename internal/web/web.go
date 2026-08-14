@@ -22,8 +22,9 @@ type Config struct {
 	Username       string                // basic-auth user (default = onvif user)
 	Password       string                // basic-auth pass (default = onvif pass)
 	AllowedOrigins []string              // CORS allowed origins (default ["*"])
-	ConfigPath     string                // path to config.yaml (used by /api/config/onvif)
+	ConfigPath     string                // path to config.yaml (used by /api/config/onvif, /api/config/gb28181)
 	OnvifConfig    config.ConfigProvider  // read-only onvif/rtsp config
+	GB28181Config  *config.GB28181Config  // GB28181 configuration
 	Params         *camera.ParamManager
 	AUHub          *h264.AUHub
 	Version        string                // build version from ldflags
@@ -188,6 +189,7 @@ func (s *Server) registerRoutes() {
 	// API routes — auth required (bearer token in Authorization header)
 	m.HandleFunc("GET /api/config", s.authRequired(s.handleGetConfig))
 	m.HandleFunc("POST /api/config/onvif", s.authRequired(s.handlePostConfigOnvif))
+	m.HandleFunc("POST /api/config/gb28181", s.authRequired(s.handlePostConfigGb28181))
 	m.HandleFunc("GET /api/camera/params", s.authRequired(s.handleGetCameraParams))
 	m.HandleFunc("POST /api/camera/param", s.authRequired(s.handlePostCameraParam))
 	m.HandleFunc("GET /api/camera/options", s.authRequired(s.handleGetCameraOptions))

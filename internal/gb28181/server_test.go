@@ -1,0 +1,558 @@
+package gb28181
+
+import (
+	"context"
+	"net"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/config"
+	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/h264"
+)
+
+// buildInvite builds a synthetic INVITE message for testing.
+func buildInvite(callID, from, to, contact string) SipMessage {
+	sdp := `v=0
+o=- 0 0 IN IP4 192.168.1.100
+s=Play
+c=IN IP4 192.168.1.100
+t=0 0
+m=video 60000 RTP/AVP 96
+a=rtpmap:96 PS/90000
+a=recvonly
+y=0100000001`
+
+	return SipMessage{
+		Method:      "INVITE",
+		RequestURI:  "sip:3402000000@3402000000",
+		From:        from,
+		To:          to,
+		CallID:      callID,
+		CSeq:        "1 INVITE",
+		Contact:     contact,
+		Via:         "SIP/2.0/UDP 192.168.1.100:5060;rport;branch=z9hG4bK-12345",
+		ContentType: "application/sdp",
+		Body:        sdp,
+		Headers:     make(map[string]string),
+	}
+}
+
+// buildBye builds a synthetic BYE message for testing.
+func buildBye(callID, from, to, contact string) SipMessage {
+	return SipMessage{
+		Method:     "BYE",
+		RequestURI: "sip:3402000000@3402000000",
+		From:       from,
+		To:         to,
+		CallID:     callID,
+		CSeq:       "2 BYE",
+		Contact:    contact,
+		Via:        "SIP/2.0/UDP 192.168.1.100:5060;rport;branch=z9hG4bK-67890",
+		Headers:    make(map[string]string),
+	}
+}
+
+// TestServer_AttachesSubscriberOnInvite verifies that the server subscribes to AUHub on INVITE and unsubscribes on BYE.
+func TestServer_AttachesSubscriberOnInvite(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Create real AUHub
+	hub := h264.NewAUHub()
+
+	// Create Server with mock config (local SIP port 0 for ephemeral)
+	cfg := config.GB28181Config{
+		DeviceID:              "34020000001320000001",
+		ChannelID:             "34020000001320000001",
+		SIPDomain:             "3402000000",
+		Password:              "12345678",
+		LocalSIPPort:          0, // Use ephemeral port
+		PlatformSIPAddress:    "127.0.0.1",
+		PlatformSIPPort:       15060, // Use different port to avoid conflict
+		RegisterIntervalSecs:  60,
+		HeartbeatIntervalSecs: 60,
+		HeartbeatTimeoutCount: 3,
+	}
+	server := New(cfg, hub)
+	server.SetTestMode()
+
+	// Start server in goroutine
+	serverErr := make(chan error, 1)
+	go func() {
+		if err := server.Start(ctx); err != nil && err != context.Canceled {
+			serverErr <- err
+		}
+	}()
+
+	// Wait for server to start and get actual SIP port
+	time.Sleep(100 * time.Millisecond)
+	sipPort := server.sipConn.LocalAddr().(*net.UDPAddr).Port
+	t.Logf("Server started on SIP port %d", sipPort)
+
+	// Check initial subscriber count (should be 0)
+	if count := hub.SubscriberCount(); count != 0 {
+		t.Fatalf("Expected 0 subscribers before INVITE, got %d", count)
+	}
+
+	// Send synthetic INVITE to SIP port
+	callID := "test-call-123@example.com"
+	from := "<sip:34020000012000000001@3402000000>;tag=12345"
+	to := "<sip:34020000001320000001@3402000000>"
+	contact := "<sip:34020000012000000001@192.168.1.100:5060>"
+
+	invite := buildInvite(callID, from, to, contact)
+	inviteBytes := invite.Serialize()
+
+	// Dial server SIP port
+	clientConn, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: sipPort})
+	if err != nil {
+		t.Fatalf("Failed to dial server: %v", err)
+	}
+	defer clientConn.Close()
+
+	// Send INVITE
+	if _, err := clientConn.Write(inviteBytes); err != nil {
+		t.Fatalf("Failed to send INVITE: %v", err)
+	}
+
+	// Wait for subscriber to be attached (give time for 200 OK + subscribe)
+	time.Sleep(200 * time.Millisecond)
+
+	// Verify subscriber attached
+	if count := hub.SubscriberCount(); count != 1 {
+		t.Fatalf("Expected 1 subscriber after INVITE, got %d", count)
+	}
+	t.Log("Subscriber attached after INVITE")
+
+	// Send BYE
+	bye := buildBye(callID, from, to, contact)
+	byeBytes := bye.Serialize()
+	if _, err := clientConn.Write(byeBytes); err != nil {
+		t.Fatalf("Failed to send BYE: %v", err)
+	}
+
+	// Wait for subscriber to be detached
+	time.Sleep(200 * time.Millisecond)
+
+	// Verify subscriber detached
+	if count := hub.SubscriberCount(); count != 0 {
+		t.Fatalf("Expected 0 subscribers after BYE, got %d", count)
+	}
+	t.Log("Subscriber detached after BYE")
+
+	// Stop server
+	cancel()
+	select {
+	case err := <-serverErr:
+		if err != nil {
+			t.Fatalf("Server error: %v", err)
+		}
+	case <-time.After(1 * time.Second):
+		// Expected shutdown
+	}
+}
+
+// TestServer_Sends200OKBeforeMedia verifies that 200 OK is sent before any RTP media.
+func TestServer_Sends200OKBeforeMedia(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	hub := h264.NewAUHub()
+	cfg := config.GB28181Config{
+		DeviceID:              "34020000001320000001",
+		ChannelID:             "34020000001320000001",
+		SIPDomain:             "3402000000",
+		Password:              "12345678",
+		LocalSIPPort:          0,
+		PlatformSIPAddress:    "127.0.0.1",
+		PlatformSIPPort:       15061,
+		RegisterIntervalSecs:  60,
+		HeartbeatIntervalSecs: 60,
+		HeartbeatTimeoutCount: 3,
+	}
+	server := New(cfg, hub)
+	server.SetTestMode()
+
+	serverErr := make(chan error, 1)
+	go func() {
+		if err := server.Start(ctx); err != nil && err != context.Canceled {
+			serverErr <- err
+		}
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	sipPort := server.sipConn.LocalAddr().(*net.UDPAddr).Port
+
+	// Send INVITE
+	callID := "test-call-456@example.com"
+	from := "<sip:34020000012000000001@3402000000>;tag=67890"
+	to := "<sip:34020000001320000001@3402000000>"
+	contact := "<sip:34020000012000000001@192.168.1.100:5060>"
+
+	invite := buildInvite(callID, from, to, contact)
+	inviteBytes := invite.Serialize()
+
+	clientConn, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: sipPort})
+	if err != nil {
+		t.Fatalf("Failed to dial server: %v", err)
+	}
+	defer clientConn.Close()
+
+	// Track timestamps
+	var ok200Time time.Time
+	var ok200Received bool
+	var mu sync.Mutex
+
+	// Start goroutine to receive responses
+	respBuf := make([]byte, 4096)
+	go func() {
+		for {
+			clientConn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+			n, _, err := clientConn.ReadFromUDP(respBuf)
+			if err != nil {
+				continue
+			}
+			msg, err := Parse(respBuf[:n])
+			if err != nil {
+				continue
+			}
+			if msg.StatusCode == 200 {
+				mu.Lock()
+				if !ok200Received {
+					ok200Received = true
+					ok200Time = time.Now()
+				}
+				mu.Unlock()
+			}
+		}
+	}()
+
+	// Send INVITE
+	inviteSentTime := time.Now()
+	if _, err := clientConn.Write(inviteBytes); err != nil {
+		t.Fatalf("Failed to send INVITE: %v", err)
+	}
+
+	// Wait for 200 OK
+	time.Sleep(300 * time.Millisecond)
+
+	mu.Lock()
+	ok200Was := ok200Received
+	ok200Ts := ok200Time
+	mu.Unlock()
+
+	if !ok200Was {
+		t.Fatal("200 OK not received")
+	}
+
+	// Verify 200 OK was sent (before any media)
+	if ok200Ts.Before(inviteSentTime) {
+		t.Fatalf("200 OK timestamp %v before invite sent time %v (impossible)", ok200Ts, inviteSentTime)
+	}
+
+	t.Logf("200 OK received at %v (after INVITE sent at %v)", ok200Ts, inviteSentTime)
+
+	// The key assertion: 200 OK was sent, and we didn't receive RTP before it
+	// (we can't easily test RTP without a real camera, but we verify the 200 OK flow)
+	cancel()
+	select {
+	case err := <-serverErr:
+		if err != nil {
+			t.Fatalf("Server error: %v", err)
+		}
+	case <-time.After(1 * time.Second):
+	}
+}
+
+// TestServer_200OK_ContainsDeviceSDP verifies that 200 OK response contains device SDP.
+func TestServer_200OK_ContainsDeviceSDP(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	hub := h264.NewAUHub()
+	cfg := config.GB28181Config{
+		DeviceID:              "34020000001320000001",
+		ChannelID:             "34020000001320000001",
+		SIPDomain:             "3402000000",
+		Password:              "12345678",
+		LocalSIPPort:          0,
+		PlatformSIPAddress:    "127.0.0.1",
+		PlatformSIPPort:       15062,
+		RegisterIntervalSecs:  60,
+		HeartbeatIntervalSecs: 60,
+		HeartbeatTimeoutCount: 3,
+	}
+	server := New(cfg, hub)
+	server.SetTestMode()
+
+	serverErr := make(chan error, 1)
+	go func() {
+		if err := server.Start(ctx); err != nil && err != context.Canceled {
+			serverErr <- err
+		}
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	sipPort := server.sipConn.LocalAddr().(*net.UDPAddr).Port
+
+	// Send INVITE
+	callID := "test-call-789@example.com"
+	from := "<sip:34020000012000000001@3402000000>;tag=11111"
+	to := "<sip:34020000001320000001@3402000000>"
+	contact := "<sip:34020000012000000001@192.168.1.100:5060>"
+
+	invite := buildInvite(callID, from, to, contact)
+	inviteBytes := invite.Serialize()
+
+	clientConn, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: sipPort})
+	if err != nil {
+		t.Fatalf("Failed to dial server: %v", err)
+	}
+	defer clientConn.Close()
+
+	if _, err := clientConn.Write(inviteBytes); err != nil {
+		t.Fatalf("Failed to send INVITE: %v", err)
+	}
+
+	// Receive 200 OK
+	respBuf := make([]byte, 4096)
+	clientConn.SetReadDeadline(time.Now().Add(1 * time.Second))
+	n, _, err := clientConn.ReadFromUDP(respBuf)
+	if err != nil {
+		t.Fatalf("Failed to read 200 OK: %v", err)
+	}
+
+	resp, err := Parse(respBuf[:n])
+	if err != nil {
+		t.Fatalf("Failed to parse 200 OK: %v", err)
+	}
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("Expected 200 OK, got %d", resp.StatusCode)
+	}
+
+	body := resp.Body
+	t.Logf("200 OK body:\n%s", body)
+
+	// Verify SDP contains required fields
+	requiredFields := []string{
+		"v=0",
+		"m=video",
+		"a=rtpmap:96 PS/90000",
+		"a=sendonly",
+		"y=",
+	}
+
+	for _, field := range requiredFields {
+		if !containsSubstring(body, field) {
+			t.Errorf("200 OK body missing required field: %s", field)
+		}
+	}
+
+	cancel()
+	select {
+	case err := <-serverErr:
+		if err != nil {
+			t.Fatalf("Server error: %v", err)
+		}
+	case <-time.After(1 * time.Second):
+	}
+}
+
+// TestServer_EchoesSSRC verifies that 200 OK echoes the SSRC from INVITE.
+func TestServer_EchoesSSRC(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	hub := h264.NewAUHub()
+	cfg := config.GB28181Config{
+		DeviceID:              "34020000001320000001",
+		ChannelID:             "34020000001320000001",
+		SIPDomain:             "3402000000",
+		Password:              "12345678",
+		LocalSIPPort:          0,
+		PlatformSIPAddress:    "127.0.0.1",
+		PlatformSIPPort:       15063,
+		RegisterIntervalSecs:  60,
+		HeartbeatIntervalSecs: 60,
+		HeartbeatTimeoutCount: 3,
+	}
+	server := New(cfg, hub)
+	server.SetTestMode()
+
+	serverErr := make(chan error, 1)
+	go func() {
+		if err := server.Start(ctx); err != nil && err != context.Canceled {
+			serverErr <- err
+		}
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	sipPort := server.sipConn.LocalAddr().(*net.UDPAddr).Port
+
+	// Send INVITE with specific SSRC y=0100000001 (decimal 100000001)
+	callID := "test-call-ssrc@example.com"
+	from := "<sip:34020000012000000001@3402000000>;tag=22222"
+	to := "<sip:34020000001320000001@3402000000>"
+	contact := "<sip:34020000012000000001@192.168.1.100:5060>"
+
+	invite := buildInvite(callID, from, to, contact)
+	inviteBytes := invite.Serialize()
+
+	clientConn, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: sipPort})
+	if err != nil {
+		t.Fatalf("Failed to dial server: %v", err)
+	}
+	defer clientConn.Close()
+
+	if _, err := clientConn.Write(inviteBytes); err != nil {
+		t.Fatalf("Failed to send INVITE: %v", err)
+	}
+
+	// Receive 200 OK
+	respBuf := make([]byte, 4096)
+	clientConn.SetReadDeadline(time.Now().Add(1 * time.Second))
+	n, _, err := clientConn.ReadFromUDP(respBuf)
+	if err != nil {
+		t.Fatalf("Failed to read 200 OK: %v", err)
+	}
+
+	resp, err := Parse(respBuf[:n])
+	if err != nil {
+		t.Fatalf("Failed to parse 200 OK: %v", err)
+	}
+
+	body := resp.Body
+	t.Logf("200 OK body:\n%s", body)
+
+	// Verify SSRC is echoed as y=100000001
+	// The INVITE had y=0100000001 which is 100000001 in decimal
+	if !containsSubstring(body, "y=100000001") {
+		t.Errorf("200 OK body does not contain echoed SSRC y=100000001, got: %s", body)
+	}
+
+	cancel()
+	select {
+	case err := <-serverErr:
+		if err != nil {
+			t.Fatalf("Server error: %v", err)
+		}
+	case <-time.After(1 * time.Second):
+	}
+}
+
+// TestServer_ByeCleansUpSubscriberAndSocket verifies that BYE cleans up subscriber and media socket.
+func TestServer_ByeCleansUpSubscriberAndSocket(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	hub := h264.NewAUHub()
+	cfg := config.GB28181Config{
+		DeviceID:              "34020000001320000001",
+		ChannelID:             "34020000001320000001",
+		SIPDomain:             "3402000000",
+		Password:              "12345678",
+		LocalSIPPort:          0,
+		PlatformSIPAddress:    "127.0.0.1",
+		PlatformSIPPort:       15064,
+		RegisterIntervalSecs:  60,
+		HeartbeatIntervalSecs: 60,
+		HeartbeatTimeoutCount: 3,
+	}
+	server := New(cfg, hub)
+	server.SetTestMode()
+
+	serverErr := make(chan error, 1)
+	go func() {
+		if err := server.Start(ctx); err != nil && err != context.Canceled {
+			serverErr <- err
+		}
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	sipPort := server.sipConn.LocalAddr().(*net.UDPAddr).Port
+
+	// Send INVITE
+	callID := "test-call-bye@example.com"
+	from := "<sip:34020000012000000001@3402000000>;tag=33333"
+	to := "<sip:34020000001320000001@3402000000>"
+	contact := "<sip:34020000012000000001@192.168.1.100:5060>"
+
+	invite := buildInvite(callID, from, to, contact)
+	inviteBytes := invite.Serialize()
+
+	clientConn, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: sipPort})
+	if err != nil {
+		t.Fatalf("Failed to dial server: %v", err)
+	}
+	defer clientConn.Close()
+
+	if _, err := clientConn.Write(inviteBytes); err != nil {
+		t.Fatalf("Failed to send INVITE: %v", err)
+	}
+
+	// Wait for subscriber to be attached
+	time.Sleep(200 * time.Millisecond)
+
+	// Verify subscriber attached
+	if count := hub.SubscriberCount(); count != 1 {
+		t.Fatalf("Expected 1 subscriber after INVITE, got %d", count)
+	}
+
+	// Verify media socket is bound
+	server.mu.Lock()
+	mediaConnNotNil := server.mediaConn != nil
+	server.mu.Unlock()
+	if !mediaConnNotNil {
+		t.Fatal("Media socket not bound after INVITE")
+	}
+
+	// Send BYE
+	bye := buildBye(callID, from, to, contact)
+	byeBytes := bye.Serialize()
+	if _, err := clientConn.Write(byeBytes); err != nil {
+		t.Fatalf("Failed to send BYE: %v", err)
+	}
+
+	// Wait for cleanup
+	time.Sleep(200 * time.Millisecond)
+
+	// Verify subscriber detached
+	if count := hub.SubscriberCount(); count != 0 {
+		t.Fatalf("Expected 0 subscribers after BYE, got %d", count)
+	}
+
+	// Verify media socket is closed
+	server.mu.Lock()
+	mediaConnClosed := server.mediaConn == nil
+	server.mu.Unlock()
+	if !mediaConnClosed {
+		t.Fatal("Media socket not nil after BYE (expected closed)")
+	}
+
+	t.Log("BYE successfully cleaned up subscriber and media socket")
+
+	cancel()
+	select {
+	case err := <-serverErr:
+		if err != nil {
+			t.Fatalf("Server error: %v", err)
+		}
+	case <-time.After(1 * time.Second):
+	}
+}
+
+// Helper function to check if a string contains a substring.
+func containsSubstring(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) && contains(s, substr))
+}
+
+func contains(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}

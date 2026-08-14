@@ -15,6 +15,7 @@ import (
 
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/camera"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/config"
+	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/gb28181"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/h264"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/hls"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/metrics"
@@ -127,14 +128,25 @@ func main() {
 
 	externalRTSPURL := ""
 	var cam camera.Camera
-	if cfg.Camera.Mode == "rtsp" {
+	switch cfg.Camera.Mode {
+	case "rtsp":
 		externalRTSPURL = cfg.Camera.RTSPURL
 		if externalRTSPURL == "" {
 			externalRTSPURL = fmt.Sprintf("rtsp://127.0.0.1:%d/stream", cfg.RTSP.Port)
 		}
 		slog.Info("camera: using external RTSP source", "url", externalRTSPURL)
 		cam = camera.NewRTSPSource(externalRTSPURL, cameraParams, cameraInfo)
-	} else {
+	case "rpicamvid":
+		// Uses the system rpicam-vid binary (resolved via PATH). The
+		// configured bin_path stays pointed at mtxrpicam for fallback.
+		slog.Info("camera: using rpicam-vid subprocess")
+		cam = camera.NewRPiCamVidCamera(
+			camera.WithVidBinPath("rpicam-vid"),
+			camera.WithVidParams(cameraParams),
+			camera.WithVidInfo(cameraInfo),
+			camera.WithVidFrameBufferSize(cfg.Camera.FrameBufferSize),
+		)
+	default:
 		cam = camera.NewRPiCamera(
 			camera.WithBinPath(cfg.Camera.BinPath),
 			camera.WithParams(cameraParams),
@@ -249,6 +261,7 @@ func main() {
 			Password:          cfg.Web.Password,
 			ConfigPath:        *configPath,
 			OnvifConfig:       adapter,
+			GB28181Config:     &cfg.GB28181,
 			Params:            paramManager,
 			AUHub:             auHub,
 			ReadHeaderTimeout: cfg.Web.ReadHeaderTimeout,
@@ -335,6 +348,18 @@ func main() {
 		}
 	}()
 
+	// --- Step 6.5: GB/T 28181 device ---
+	var gbServer *gb28181.Server
+	if cfg.GB28181.Enabled {
+		gbServer = gb28181.New(cfg.GB28181, auHub)
+		go func() {
+			if err := gbServer.Start(ctx); err != nil {
+				slog.Error("gb28181 server", "error", err)
+			}
+		}()
+		slog.Info("gb28181: starting", "port", cfg.GB28181.LocalSIPPort)
+	}
+
 	// --- Step 7: Metrics ---
 	if cfg.Metrics.Enabled {
 		metricsMux := http.NewServeMux()
@@ -382,6 +407,11 @@ func main() {
 	slog.Info("MiBee Eye shutting down", "version", version)
 	shutdownStep("discovery", 5*time.Second, func() error { return discovery.StopUDP() })
 	shutdownStep("onvif", 5*time.Second, func() error { return onvifServer.Stop() })
+
+	if gbServer != nil {
+		gbServer.Stop()
+		slog.Info("gb28181: stopped")
+	}
 	shutdownStep("web", 5*time.Second, func() error {
 		if webServer != nil {
 			return webServer.Stop()
