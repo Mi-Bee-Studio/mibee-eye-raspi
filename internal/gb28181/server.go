@@ -403,6 +403,25 @@ func (s *Server) handleInvite(ctx context.Context, msg SipMessage, fromAddr *net
 	}
 	slog.Info("gb28181: parsed SSRC and RTP destination from INVITE", "ssrc", ssrc, "rtp_dest", rtpDest.String())
 
+	// Tear down any previous media session before starting a new one.
+	// Repeated INVITEs (NVR re-register auto-INVITE, NVR restart) would
+	// otherwise leak a media goroutine + socket per INVITE, each continuing
+	// to push a parallel RTP stream.
+	s.mu.Lock()
+	if s.mediaCancel != nil {
+		s.mediaCancel()
+		s.mediaCancel = nil
+	}
+	if s.sub != nil {
+		s.hub.Unsubscribe(s.sub.ID)
+		s.sub = nil
+	}
+	if s.mediaConn != nil {
+		s.mediaConn.Close()
+		s.mediaConn = nil
+	}
+	s.mu.Unlock()
+
 	// Bind local media UDP on ephemeral port
 	mediaConn, err := net.ListenUDP("udp", nil)
 	if err != nil {

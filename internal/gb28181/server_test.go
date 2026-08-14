@@ -687,3 +687,109 @@ func TestServer_SendsRtpToSdpAddressNotSipPeer(t *testing.T) {
 
 	t.Logf("RTP arrived at SDP media address 127.0.0.1:%d (%d bytes)", mediaPort, n)
 }
+
+// TestServer_ReInviteReplacesPreviousSession verifies that a second INVITE
+// tears down the previous media session instead of leaking a parallel
+// RTP stream (observed live: 3 simultaneous streams to the same NVR port
+// after NVR re-registers).
+func TestServer_ReInviteReplacesPreviousSession(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	hub := h264.NewAUHub()
+	cfg := config.GB28181Config{
+		DeviceID:              "34020000001320000001",
+		ChannelID:             "34020000001320000001",
+		SIPDomain:             "3402000000",
+		Password:              "12345678",
+		LocalSIPPort:          0,
+		PlatformSIPAddress:    "127.0.0.1",
+		PlatformSIPPort:       15066,
+		RegisterIntervalSecs:  60,
+		HeartbeatIntervalSecs: 60,
+		HeartbeatTimeoutCount: 3,
+	}
+	server := New(cfg, hub)
+	server.SetTestMode()
+
+	go func() {
+		_ = server.Start(ctx)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	sipPort := server.sipConn.LocalAddr().(*net.UDPAddr).Port
+
+	clientConn, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: sipPort})
+	if err != nil {
+		t.Fatalf("failed to dial server: %v", err)
+	}
+	defer clientConn.Close()
+
+	buildSdpInvite := func(port int) SipMessage {
+		sdp := fmt.Sprintf("v=0\no=- 0 0 IN IP4 127.0.0.1\ns=Play\nc=IN IP4 127.0.0.1\nt=0 0\nm=video %d RTP/AVP 96\ny=0100000001", port)
+		inv := buildInvite("test-call-reinvite@example.com",
+			"<sip:34020000012000000001@3402000000>;tag=55555",
+			"<sip:34020000001320000001@3402000000>",
+			"<sip:34020000012000000001@127.0.0.1:5060>")
+		inv.Body = sdp
+		return inv
+	}
+
+	// First INVITE → media port A
+	sockA, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatalf("bind sockA: %v", err)
+	}
+	defer sockA.Close()
+	portA := sockA.LocalAddr().(*net.UDPAddr).Port
+	if _, err := clientConn.Write(buildSdpInvite(portA).Serialize()); err != nil {
+		t.Fatalf("send INVITE 1: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if count := hub.SubscriberCount(); count != 1 {
+		t.Fatalf("expected 1 subscriber after INVITE 1, got %d", count)
+	}
+
+	// Second INVITE → media port B
+	sockB, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatalf("bind sockB: %v", err)
+	}
+	defer sockB.Close()
+	portB := sockB.LocalAddr().(*net.UDPAddr).Port
+	if _, err := clientConn.Write(buildSdpInvite(portB).Serialize()); err != nil {
+		t.Fatalf("send INVITE 2: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	// Still exactly one subscriber and one usable media session.
+	if count := hub.SubscriberCount(); count != 1 {
+		t.Fatalf("expected 1 subscriber after re-INVITE, got %d (leaked session)", count)
+	}
+
+	// Media now flows to B, and A must go silent.
+	hub.Write(h264.AccessUnit{
+		NALUs:     []h264.NALU{{Type: 5, Data: []byte{0x65, 0x11, 0x22, 0x33}, IsIDR: true}},
+		Timestamp: time.Now(),
+		KeyFrame:  true,
+	})
+
+	sockB.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 2048)
+	if n, _, err := sockB.ReadFromUDP(buf); err != nil {
+		t.Fatalf("no RTP at new media address after re-INVITE: %v", err)
+	} else if n < 12 || buf[0]>>6 != 2 {
+		t.Fatalf("packet at new address is not RTP v2 (len=%d)", n)
+	}
+
+	sockA.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	for {
+		n, _, err := sockA.ReadFromUDP(buf)
+		if err != nil {
+			break // timeout — old address silent, good
+		}
+		if n >= 12 && buf[0]>>6 == 2 {
+			t.Fatal("old media address still receiving RTP after re-INVITE (leaked goroutine)")
+		}
+	}
+}
