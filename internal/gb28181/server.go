@@ -31,11 +31,14 @@ import (
 )
 
 type Server struct {
-	cfg         config.GB28181Config
-	deviceCfg   config.DeviceConfig
-	hub         *h264.AUHub
-	sipConn     *net.UDPConn
-	mediaConn   *net.UDPConn
+	cfg          config.GB28181Config
+	deviceCfg    config.DeviceConfig
+	hub          *h264.AUHub
+	sipConn      *net.UDPConn
+	mediaConn    *net.UDPConn
+	mediaTCPConn *net.TCPConn
+	// tcpConns tracks active TCP SIP connections keyed by remote address
+	tcpConns    sync.Map
 	mu          sync.Mutex
 	cancel      context.CancelFunc
 	mediaCancel context.CancelFunc
@@ -69,8 +72,6 @@ func New(cfg config.GB28181Config, deviceCfg config.DeviceConfig, hub *h264.AUHu
 	}
 }
 
-
-
 // SetTestMode enables test mode which skips REGISTER lifecycle.
 func (s *Server) SetTestMode() {
 	s.testMode = true
@@ -86,7 +87,7 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	s.sipConn = sipConn
 	slog.Info("gb28181: SIP UDP listener started", "port", s.cfg.LocalSIPPort)
-	
+
 	// Initialize device context for MANSCDP responses
 	s.devCtx = DeviceContext{
 		DeviceID:     s.cfg.DeviceID,
@@ -224,9 +225,24 @@ func (s *Server) Stop() {
 	if s.mediaConn != nil {
 		s.mediaConn.Close()
 	}
+	if s.mediaTCPConn != nil {
+		s.mediaTCPConn.Close()
+	}
 	if s.sipConn != nil {
 		s.sipConn.Close()
 	}
+}
+
+// sendSIP sends a SIP message to the given peer, dispatching to UDP or TCP.
+func (s *Server) sendSIP(data []byte, addr net.Addr) error {
+	if udpAddr, ok := addr.(*net.UDPAddr); ok {
+		_, err := s.sipConn.WriteToUDP(data, udpAddr)
+		return err
+	}
+	if tcpAddr, ok := addr.(*net.TCPAddr); ok {
+		return s.sendToTCP(data, tcpAddr)
+	}
+	return fmt.Errorf("unknown address type: %T", addr)
 }
 
 // parseSDP extracts the RTP media destination and SSRC from the INVITE SDP body.
@@ -280,7 +296,25 @@ func parseSDP(body string) (string, uint32, error) {
 }
 
 // buildDeviceSDP builds the device SDP answer for INVITE 200 OK.
-func buildDeviceSDP(deviceID, localIP string, mediaPort int, ssrc uint32) string {
+// For TCP transport it emits TCP/RTP/AVP with a=setup:active (device actively
+// connects to the platform media port) and a=connection:new per GB/T 28181.
+func buildDeviceSDP(deviceID, localIP string, mediaPort int, ssrc uint32, transport string) string {
+	if transport == "tcp" {
+		// TCP/RTP/AVP per GB/T 28181 with $-framing
+		return fmt.Sprintf(`v=0
+o=%s 0 0 IN IP4 %s
+s=Play
+c=IN IP4 %s
+t=0 0
+m=video %d TCP/RTP/AVP 0
+a=setup:active
+a=connection:new
+a=sendonly
+a=rtpmap:96 PS/90000
+y=%d`,
+			deviceID, localIP, localIP, mediaPort, ssrc)
+	}
+	// UDP RTP/AVP (default)
 	return fmt.Sprintf(`v=0
 o=%s 0 0 IN IP4 %s
 s=Play
@@ -519,7 +553,7 @@ func (s *Server) sendKeepalive(ctx context.Context) error {
 }
 
 // handleInvite handles INVITE requests - parses SDP, binds media, sends 200 OK with device SDP, subscribes to AUHub.
-func (s *Server) handleInvite(ctx context.Context, msg SipMessage, fromAddr *net.UDPAddr) {
+func (s *Server) handleInvite(ctx context.Context, msg SipMessage, fromAddr net.Addr) {
 	slog.Info("gb28181: received INVITE", "from", fromAddr.String())
 
 	// Parse SDP for RTP destination and SSRC — the media address comes from the
@@ -554,6 +588,10 @@ func (s *Server) handleInvite(ctx context.Context, msg SipMessage, fromAddr *net
 		s.mediaConn.Close()
 		s.mediaConn = nil
 	}
+	if s.mediaTCPConn != nil {
+		s.mediaTCPConn.Close()
+		s.mediaTCPConn = nil
+	}
 	s.mu.Unlock()
 
 	// Bind local media UDP on ephemeral port
@@ -576,13 +614,29 @@ func (s *Server) handleInvite(ctx context.Context, msg SipMessage, fromAddr *net
 		slog.Warn("gb28181: failed to determine local IP, falling back to interface scan", "error", err)
 		localIPAddr = localIP()
 	}
-	deviceSDP := buildDeviceSDP(s.cfg.DeviceID, localIPAddr, localMediaPort, ssrc)
+	deviceSDP := buildDeviceSDP(s.cfg.DeviceID, localIPAddr, localMediaPort, ssrc, s.cfg.Transport)
 
 	// Send 200 OK with SDP answer
 	ok200 := Build200OK(msg, "application/sdp", deviceSDP)
-	if _, err := s.sipConn.WriteToUDP(ok200.Serialize(), fromAddr); err != nil {
+	if err := s.sendSIP(ok200.Serialize(), fromAddr); err != nil {
 		slog.Warn("gb28181: failed to send 200 OK", "error", err)
 		return
+	}
+
+	// For TCP transport, actively connect to the platform's media port
+	// (device connects TO platform - active mode per GB/T 28181).
+	var mediaTCPConn *net.TCPConn
+	if s.cfg.Transport == "tcp" {
+		conn, err := net.Dial("tcp", mediaAddr)
+		if err != nil {
+			slog.Warn("gb28181: failed to connect to TCP media port", "addr", mediaAddr, "error", err)
+			return
+		}
+		mediaTCPConn = conn.(*net.TCPConn)
+		slog.Info("gb28181: connected to TCP media port", "addr", mediaAddr)
+		s.mu.Lock()
+		s.mediaTCPConn = mediaTCPConn
+		s.mu.Unlock()
 	}
 
 	// Subscribe to AUHub
@@ -603,7 +657,10 @@ func (s *Server) handleInvite(ctx context.Context, msg SipMessage, fromAddr *net
 	go func() {
 		defer mediaCancel()
 		pusher := NewRtpPusher(mediaConn, rtpDest)
-		slog.Info("gb28181: media goroutine started", "remote", rtpDest.String())
+		if mediaTCPConn != nil {
+			pusher.SetTCPConn(mediaTCPConn)
+		}
+		slog.Info("gb28181: media goroutine started", "remote", rtpDest.String(), "transport", s.cfg.Transport)
 
 		for {
 			select {
@@ -632,7 +689,7 @@ func (s *Server) handleInvite(ctx context.Context, msg SipMessage, fromAddr *net
 }
 
 // handleBye handles BYE requests - unsubscribe from AUHub and close media socket.
-func (s *Server) handleBye(ctx context.Context, msg SipMessage, fromAddr *net.UDPAddr) {
+func (s *Server) handleBye(ctx context.Context, msg SipMessage, fromAddr net.Addr) {
 	slog.Info("gb28181: received BYE", "from", fromAddr.String())
 
 	s.mu.Lock()
@@ -644,6 +701,10 @@ func (s *Server) handleBye(ctx context.Context, msg SipMessage, fromAddr *net.UD
 		s.mediaConn.Close()
 		s.mediaConn = nil
 	}
+	if s.mediaTCPConn != nil {
+		s.mediaTCPConn.Close()
+		s.mediaTCPConn = nil
+	}
 	if s.mediaCancel != nil {
 		s.mediaCancel()
 		s.mediaCancel = nil
@@ -653,14 +714,14 @@ func (s *Server) handleBye(ctx context.Context, msg SipMessage, fromAddr *net.UD
 
 	// Send 200 OK to BYE
 	ok200 := Build200OK(msg, "", "")
-	if _, err := s.sipConn.WriteToUDP(ok200.Serialize(), fromAddr); err != nil {
+	if err := s.sendSIP(ok200.Serialize(), fromAddr); err != nil {
 		slog.Warn("gb28181: failed to send 200 OK to BYE", "error", err)
 	}
 	slog.Info("gb28181: sent 200 OK to BYE")
 }
 
 // handleMessage handles MESSAGE requests - dispatch MANSCDP XML, send 200 OK, and any queued response.
-func (s *Server) handleMessage(ctx context.Context, msg SipMessage, fromAddr *net.UDPAddr) {
+func (s *Server) handleMessage(ctx context.Context, msg SipMessage, fromAddr net.Addr) {
 	ok200, queuedResp, err := DispatchInboundMessage(msg, s.devCtx)
 	if err != nil {
 		slog.Warn("gb28181: failed to dispatch MESSAGE", "error", err)
@@ -668,7 +729,7 @@ func (s *Server) handleMessage(ctx context.Context, msg SipMessage, fromAddr *ne
 	}
 
 	// Send 200 OK
-	if _, err := s.sipConn.WriteToUDP(ok200.Serialize(), fromAddr); err != nil {
+	if err := s.sendSIP(ok200.Serialize(), fromAddr); err != nil {
 		slog.Warn("gb28181: failed to send 200 OK to MESSAGE", "error", err)
 	}
 
@@ -683,7 +744,7 @@ func (s *Server) handleMessage(ctx context.Context, msg SipMessage, fromAddr *ne
 		queuedResp.Via = fmt.Sprintf("SIP/2.0/UDP %s:%d;rport;branch=z9hG4bK%016x", localIP(), s.cfg.LocalSIPPort, time.Now().UnixNano())
 		queuedResp.MaxForwards = "70"
 		queuedResp.CSeq = "2 MESSAGE"
-		if _, err := s.sipConn.WriteToUDP(queuedResp.Serialize(), fromAddr); err != nil {
+		if err := s.sendSIP(queuedResp.Serialize(), fromAddr); err != nil {
 			slog.Warn("gb28181: failed to send queued MESSAGE response", "error", err)
 		}
 	}

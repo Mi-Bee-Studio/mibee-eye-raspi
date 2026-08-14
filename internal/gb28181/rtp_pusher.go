@@ -1,5 +1,5 @@
 // Package gb28181 implements RTP packetization of PS streams and
-// UDP push to the GB/T 28181 platform using github.com/pion/rtp.
+// UDP/TCP push to the GB/T 28181 platform using github.com/pion/rtp.
 package gb28181
 
 import (
@@ -11,13 +11,14 @@ import (
 	"github.com/pion/rtp"
 )
 
-// RtpPusher manages RTP packetization and UDP transmission of PS streams.
+// RtpPusher manages RTP packetization and UDP/TCP transmission of PS streams.
 //
 // SSRC is provided by the platform via INVITE SDP y= field (10-digit decimal),
 // NOT derived from device_id+channel_id.
 type RtpPusher struct {
 	conn       *net.UDPConn
 	remoteAddr *net.UDPAddr
+	tcpConn    *net.TCPConn
 	seqNum     uint16
 	mu         sync.Mutex
 }
@@ -30,6 +31,14 @@ func NewRtpPusher(conn *net.UDPConn, remoteAddr *net.UDPAddr) *RtpPusher {
 		remoteAddr: remoteAddr,
 		seqNum:     uint16(time.Now().UnixNano() & 0xFFFF), // Random init
 	}
+}
+
+// SetTCPConn sets the TCP connection for framed RTP transport.
+// When set, SendFrame will use $-framing (GB/T 28181 Annex C.2).
+func (rp *RtpPusher) SetTCPConn(conn *net.TCPConn) {
+	rp.mu.Lock()
+	defer rp.mu.Unlock()
+	rp.tcpConn = conn
 }
 
 // BuildRtpPacket builds an RTP packet using pion/rtp.
@@ -59,6 +68,18 @@ func BuildRtpPacket(payload []byte, marker bool, ssrc uint32, seqNum uint16, tim
 	return buf, nil
 }
 
+// writeRTPOverTCP frames an RTP packet with GB/T 28181 $-framing.
+// Per Annex C.2: [0x24 '$'] [2-byte big-endian length] [RTP packet bytes]
+func writeRTPOverTCP(conn net.Conn, rtpPkt []byte) error {
+	frame := make([]byte, 3+len(rtpPkt))
+	frame[0] = 0x24 // '$' framing byte
+	frame[1] = byte(len(rtpPkt) >> 8)
+	frame[2] = byte(len(rtpPkt))
+	copy(frame[3:], rtpPkt)
+	_, err := conn.Write(frame)
+	return err
+}
+
 const (
 	// rtpMtu is the maximum payload size per RTP packet
 	rtpMtu = 1400
@@ -75,7 +96,7 @@ const (
 // The marker bit is set to true ONLY on the last fragment of the access unit.
 // Thread-safe (mutex protects sequence number increment).
 //
-// Returns error on UDP send failure.
+// Returns error on UDP/TCP send failure.
 func (rp *RtpPusher) SendFrame(psData []byte, isKeyFrame bool, pts time.Time, ssrc uint32) error {
 	rp.mu.Lock()
 	defer rp.mu.Unlock()
@@ -101,12 +122,19 @@ func (rp *RtpPusher) SendFrame(psData []byte, isKeyFrame bool, pts time.Time, ss
 			return fmt.Errorf("failed to build RTP packet for fragment %d: %w", fragmentIndex, err)
 		}
 
-		// WriteToUDP on an unconnected socket is non-blocking: the packet is
-		// queued to the kernel send buffer and the call returns immediately
-		// (only blocks if the buffer is full, which a 1400-byte PS fragment
-		// at camera bitrates never saturates).
-		if _, err := rp.conn.WriteToUDP(rtpBuf, rp.remoteAddr); err != nil {
-			return fmt.Errorf("failed to send RTP packet fragment %d: %w", fragmentIndex, err)
+		// Send via UDP or TCP (with $-framing for TCP per GB/T 28181 Annex C.2)
+		if rp.tcpConn != nil {
+			if err := writeRTPOverTCP(rp.tcpConn, rtpBuf); err != nil {
+				return fmt.Errorf("failed to send RTP packet fragment %d over TCP: %w", fragmentIndex, err)
+			}
+		} else {
+			// WriteToUDP on an unconnected socket is non-blocking: the packet is
+			// queued to the kernel send buffer and the call returns immediately
+			// (only blocks if the buffer is full, which a 1400-byte PS fragment
+			// at camera bitrates never saturates).
+			if _, err := rp.conn.WriteToUDP(rtpBuf, rp.remoteAddr); err != nil {
+				return fmt.Errorf("failed to send RTP packet fragment %d over UDP: %w", fragmentIndex, err)
+			}
 		}
 
 		// Increment sequence number for next packet

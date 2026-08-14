@@ -118,6 +118,7 @@ type GB28181Config struct {
 	RegisterIntervalSecs  int    `yaml:"register_interval_secs"`  // SIP REGISTER interval (seconds)
 	HeartbeatIntervalSecs int    `yaml:"heartbeat_interval_secs"` // SIP keepalive heartbeat interval (seconds)
 	HeartbeatTimeoutCount int    `yaml:"heartbeat_timeout_count"` // Missed heartbeats before declaring timeout
+	Transport            string `yaml:"transport"`               // SIP transport: udp (default) or tcp
 }
 // Config is the top-level configuration for MiBee Eye.
 type Config struct {
@@ -218,6 +219,7 @@ func DefaultConfig() *Config {
 			RegisterIntervalSecs:  60,
 			HeartbeatIntervalSecs: 60,
 			HeartbeatTimeoutCount: 3,
+			Transport:             "udp",
 		},
 	}
 }
@@ -325,6 +327,7 @@ func applyEnvOverrides(cfg *Config) {
 	overrideInt("MIBEE_EYE_GB28181_REGISTER_INTERVAL_SECS", &cfg.GB28181.RegisterIntervalSecs)
 	overrideInt("MIBEE_EYE_GB28181_HEARTBEAT_INTERVAL_SECS", &cfg.GB28181.HeartbeatIntervalSecs)
 	overrideInt("MIBEE_EYE_GB28181_HEARTBEAT_TIMEOUT_COUNT", &cfg.GB28181.HeartbeatTimeoutCount)
+	overrideString("MIBEE_EYE_GB28181_TRANSPORT", &cfg.GB28181.Transport)
 }
 
 // Sentinel errors for config validation.
@@ -332,6 +335,7 @@ var (
 	errMustBePositive  = errors.New("must be positive")
 	errInvalidCodec    = errors.New("codec must be h264 or h265")
 	errInvalidLogLevel = errors.New("level must be debug, info, warn, or error")
+	errInvalidTransport = errors.New("gb28181 transport must be udp or tcp")
 )
 
 // Validate checks all config fields and returns a detailed error if any are invalid.
@@ -411,6 +415,14 @@ func (c *Config) Validate() error {
 	}
 	if c.Snapshot.Enabled && (c.Snapshot.Quality < 0 || c.Snapshot.Quality > 100) {
 		return fmt.Errorf("config.snapshot.quality: must be between 0 and 100, got %d", c.Snapshot.Quality)
+	}
+	switch c.GB28181.Transport {
+	case "udp", "tcp":
+		// valid
+	case "":
+		c.GB28181.Transport = "udp"
+	default:
+		return fmt.Errorf("config.gb28181.transport: %w", errInvalidTransport)
 	}
 	return nil
 }
