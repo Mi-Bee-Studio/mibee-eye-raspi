@@ -128,14 +128,25 @@ func main() {
 
 	externalRTSPURL := ""
 	var cam camera.Camera
-	if cfg.Camera.Mode == "rtsp" {
+	switch cfg.Camera.Mode {
+	case "rtsp":
 		externalRTSPURL = cfg.Camera.RTSPURL
 		if externalRTSPURL == "" {
 			externalRTSPURL = fmt.Sprintf("rtsp://127.0.0.1:%d/stream", cfg.RTSP.Port)
 		}
 		slog.Info("camera: using external RTSP source", "url", externalRTSPURL)
 		cam = camera.NewRTSPSource(externalRTSPURL, cameraParams, cameraInfo)
-	} else {
+	case "rpicamvid":
+		// Uses the system rpicam-vid binary (resolved via PATH). The
+		// configured bin_path stays pointed at mtxrpicam for fallback.
+		slog.Info("camera: using rpicam-vid subprocess")
+		cam = camera.NewRPiCamVidCamera(
+			camera.WithVidBinPath("rpicam-vid"),
+			camera.WithVidParams(cameraParams),
+			camera.WithVidInfo(cameraInfo),
+			camera.WithVidFrameBufferSize(cfg.Camera.FrameBufferSize),
+		)
+	default:
 		cam = camera.NewRPiCamera(
 			camera.WithBinPath(cfg.Camera.BinPath),
 			camera.WithParams(cameraParams),

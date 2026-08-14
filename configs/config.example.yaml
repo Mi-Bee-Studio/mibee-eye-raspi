@@ -6,7 +6,7 @@
 camera:
   # Camera device path (V4L2 or libcamera)
   device: /dev/video0
-  # Capture mode: "mtxrpicam" (default, uses subprocess) or "rtsp" (consumes external RTSP URL)
+  # Capture mode: "mtxrpicam" (default, uses subprocess), "rpicamvid" (system rpicam-vid), or "rtsp" (consumes external RTSP URL)
   mode: mtxrpicam
 
   # External RTSP URL when mode=rtsp (ignored when mode=mtxrpicam)

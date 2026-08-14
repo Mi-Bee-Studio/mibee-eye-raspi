@@ -15,7 +15,7 @@ import (
 // CameraConfig holds camera capture settings.
 type CameraConfig struct {
 	Device      string  `yaml:"device"`       // Camera device path
-	Mode        string  `yaml:"mode"`         // Capture mode: "mtxrpicam" (default) or "rtsp"
+	Mode        string  `yaml:"mode"`         // Capture mode: "mtxrpicam" (default), "rpicamvid", or "rtsp"
 	RTSPURL     string  `yaml:"rtsp_url"`     // External RTSP URL when mode=rtsp
 	Width       int     `yaml:"width"`        // Capture width in pixels
 	Height      int     `yaml:"height"`       // Capture height in pixels
