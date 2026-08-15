@@ -10,6 +10,11 @@ import (
 	"time"
 )
 
+// RecordActive reports whether the device is currently recording.
+// It is a package-level hook set by the recording subsystem; when nil
+// or false, DeviceStatus reports <Record>OFF</Record>.
+var RecordActive func() bool
+
 // Query represents a MANSCDP Query request.
 type Query struct {
 	XMLName  xml.Name `xml:"Query"`
@@ -278,7 +283,11 @@ func BuildRecordInfoResponseMessage(sn, deviceID string) SipMessage {
 
 // BuildDeviceStatusResponseMessage creates a SIP MESSAGE with DeviceStatus response.
 func BuildDeviceStatusResponseMessage(sn, deviceID string) SipMessage {
-	body := fmt.Sprintf(`<Response CmdType="DeviceStatus" SN="%s"><DeviceID>%s</DeviceID><Result>OK</Result><Online>ONLINE</Online><Status>OK</Status><Encode>ON</Encode><Record>OFF</Record><DeviceTime>%s</DeviceTime></Response>`, sn, deviceID, time.Now().Format("2006-01-02T15:04:05"))
+	record := "OFF"
+	if RecordActive != nil && RecordActive() {
+		record = "ON"
+	}
+	body := fmt.Sprintf(`<Response CmdType="DeviceStatus" SN="%s"><DeviceID>%s</DeviceID><Result>OK</Result><Online>ONLINE</Online><Status>OK</Status><Encode>ON</Encode><Record>%s</Record><DeviceTime>%s</DeviceTime></Response>`, sn, deviceID, record, time.Now().Format("2006-01-02T15:04:05"))
 	return SipMessage{
 		Method:      "MESSAGE",
 		ContentType: "Application/MANSCDP+xml",
