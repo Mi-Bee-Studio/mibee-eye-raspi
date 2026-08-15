@@ -25,6 +25,8 @@ MiBee Eye is a lightweight Go ONVIF camera service for single-board computers (R
 - **RTSP Streaming** - H.264 video streaming at configurable resolutions and bitrates
 - **RTMP Push** - Stream to cloud services like Aliyun, Twitch, YouTube
 - **WS-Discovery** - Automatic camera discovery on the network
+- **GB28181 Device** - SIP registration, Catalog/RecordInfo queries, live/playback/download PS streaming over UDP or TCP, SIP INFO playback control (pause/resume/seek/speed)
+- **Local Recording** - Continuous H.264 segments with `index.jsonl`, retention days and storage cap; feeds GB28181 playback
 - **Web Admin UI** - Dark-themed admin panel with live preview and camera controls
 
 - **Camera Controls** - Brightness, contrast, saturation, sharpness adjustment
@@ -65,6 +67,10 @@ See `configs/config.example.yaml` for all configuration options. Key settings in
 - `onvif.username/password` - ONVIF authentication credentials
 - `web.enabled` - Enable Web admin UI (default: true)
 - `web.port` - Web UI HTTP port (8088 default)
+- `gb28181.enabled` - Register with a SIP platform (default: false)
+- `gb28181.transport` - SIP transport: `udp` or `tcp` (default: udp)
+- `recording.enabled` - Continuous local recording (default: false)
+- `recording.storage_path/segment_secs/retention_days/max_storage_mb` - Recording layout and pruning (default: `recordings` / 600 / 3 / 8192)
 
 Environment variables override any config setting with `MIBEE_EYE_` prefix:
 ```bash
@@ -123,6 +129,8 @@ flowchart TB
         HLS["HLS 桥接"]
         ONVIF["ONVIF 服务"]
         RTMP["RTMP 推流"]
+        GB["GB28181 SIP 设备"]
+        REC["本地录制"]
         CTRL["相机控制"]
         WEBUI["Web 管理界面"]
     end
@@ -135,6 +143,9 @@ flowchart TB
     CAM --> CAP
     CAP --> RTSP
     CAP --> RTMP
+    CAP --> REC
+    CAP --> GB
+    REC --> GB
     RTSP --> ONVIF
     RTSP --> HLS
     HLS --> WEBUI
@@ -142,8 +153,9 @@ flowchart TB
     WEBUI --> ONVIF
     ONVIF --> NVR
     RTMP --> CLOUD
+    GB --> NVR
 ```
-Camera capture via CSI interface supports OV5647, IMX219, IMX708, IMX477 modules. RTSP server uses `gortsplib` (same as MediaMTX). ONVIF provides device discovery, media control and imaging parameter adjustment. RTMP push supports cloud services.
+Camera capture via CSI interface supports OV5647, IMX219, IMX708, IMX477 modules. RTSP server uses `gortsplib` (same as MediaMTX). ONVIF provides device discovery, media control and imaging parameter adjustment. RTMP push supports cloud services. GB28181 registers with a SIP platform (UDP or TCP) and pushes live/playback/download PS streams; local recording feeds GB28181 RecordInfo and playback INVITEs.
 
 | Metric | MiBee Eye | MediaMTX | Improvement |
 |--------|---------|----------|-------------|

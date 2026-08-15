@@ -25,6 +25,8 @@ MiBee Eye 是一个轻量级的 Go ONVIF 相机服务，支持树莓派、香蕉
 - **RTSP 流媒体** - H.264 视频流，支持可配置的分辨率和码率
 - **RTMP 推流** - 推送到阿里云、Twitch、YouTube 等云服务
 - **WS-Discovery** - 网络自动发现相机
+- **GB28181 接入** - SIP 注册、Catalog/RecordInfo 查询、直播/回放/下载 PS 流（UDP/TCP）、SIP INFO 回放控制（暂停/恢复/拖动/倍速）
+- **本地录制** - 持续 H.264 分段 + `index.jsonl` 索引，保留天数与容量上限；作为 GB28181 回放源
 - **HLS 直播流** - 纯 Go MPEG-TS 分段器，支持 Web 直播流（无 ffmpeg 依赖）
 - **国际化支持** - 中英文界面切换 (i18n)
 - **Web 管理界面** - 基于 token 认证的登录页面，支持 HLS 视频播放器，语言和主题切换，快照功能
@@ -66,6 +68,10 @@ sudo systemctl enable --now mibee-eye
 - `onvif.username/password` - ONVIF 认证凭据
 - `web.enabled` - 启用 Web 管理界面（默认 true）
 - `web.port` - Web 界面 HTTP 端口（默认 8088）
+- `gb28181.enabled` - 向 SIP 平台注册（默认 false）
+- `gb28181.transport` - SIP 传输：`udp` 或 `tcp`（默认 udp）
+- `recording.enabled` - 持续本地录制（默认 false）
+- `recording.storage_path/segment_secs/retention_days/max_storage_mb` - 录制目录与清理策略（默认：`recordings` / 600 / 3 / 8192）
 
 
 环境变量使用 `MIBEE_EYE_` 前缀覆盖任何配置设置：
@@ -125,6 +131,8 @@ flowchart TB
         HLS["HLS 直播桥 (纯 Go) "]
         ONVIF["ONVIF 服务"]
         RTMP["RTMP 推流"]
+        GB["GB28181 SIP 设备"]
+        REC["本地录制"]
         CTRL["相机控制"]
         WEBUI["Web 管理界面"]
     end
@@ -138,6 +146,9 @@ flowchart TB
     CAM --> CAP
     CAP --> RTSP
     CAP --> HLS
+    CAP --> REC
+    CAP --> GB
+    REC --> GB
     RTSP --> ONVIF
     HLS --> WEBUI
     CTRL --> ONVIF
@@ -145,9 +156,10 @@ flowchart TB
     ONVIF --> NVR
     RTMP --> CLOUD
     WEBUI --> BROWSER
+    GB --> NVR
 ```
 
-相机采集通过 CSI 接口，支持 OV5647、IMX219、IMX708、IMX477 等模块。RTSP 服务器使用与 MediaMTX 相同的 gortsplib 库。ONVIF 服务提供完整的设备发现、媒体控制和图像参数调节。RTMP 推流支持云服务。
+相机采集通过 CSI 接口，支持 OV5647、IMX219、IMX708、IMX477 等模块。RTSP 服务器使用与 MediaMTX 相同的 gortsplib 库。ONVIF 服务提供完整的设备发现、媒体控制和图像参数调节。RTMP 推流支持云服务。GB28181 向 SIP 平台注册（UDP/TCP）并推送直播/回放/下载 PS 流；本地录制为 GB28181 RecordInfo 查询与回放 INVITE 提供片源。
 
 ### 性能对比
 
