@@ -338,6 +338,8 @@ func statusReason(code int) string {
 		return "Unauthorized"
 	case 404:
 		return "Not Found"
+	case 488:
+		return "Not Acceptable Here"
 	case 500:
 		return "Server Internal Error"
 	case 503:

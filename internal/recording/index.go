@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -199,4 +200,11 @@ func (ix *Index) TotalSize() int64 {
 		total += si.Size
 	}
 	return total
+}
+
+// Root returns the recording root directory (the parent of the index file).
+func (ix *Index) Root() string {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	return filepath.Dir(ix.path)
 }
