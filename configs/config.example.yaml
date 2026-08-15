@@ -199,3 +199,23 @@ gb28181:
 
   # Missed heartbeats before declaring the platform unreachable
   heartbeat_timeout_count: 3
+
+# Local continuous recording settings (disabled by default)
+# Segments are bare H.264 files at recordings/YYYY-MM-DD/HH/MMSS.h264
+# plus an append-only recordings/index.jsonl consumed by GB28181 RecordInfo
+# and Playback/Download INVITE streaming.
+recording:
+  # Enable continuous local recording
+  enabled: false
+
+  # Recording root directory
+  storage_path: "recordings"
+
+  # Target segment duration in seconds (default: 600)
+  segment_secs: 600
+
+  # Delete segments older than this many days (0 = infinite)
+  retention_days: 3
+
+  # Prune oldest segments above this cap in MB (0 = unlimited)
+  max_storage_mb: 8192

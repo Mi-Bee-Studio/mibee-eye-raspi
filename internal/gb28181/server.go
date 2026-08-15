@@ -28,6 +28,7 @@ import (
 
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/config"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/h264"
+	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/recording"
 )
 
 type Server struct {
@@ -61,6 +62,11 @@ type Server struct {
 	testMode bool
 	// devContext holds device identity for MANSCDP responses
 	devCtx DeviceContext
+	// recordingIndex supplies recorded segments for RecordInfo queries (nil = none)
+	recordingIndex RecordingIndex
+	// playbackCtl routes SIP INFO PlaybackControl commands to the active
+	// playback goroutine (nil when no playback session is active). Guarded by mu.
+	playbackCtl chan<- PlaybackControl
 }
 
 // New creates a new GB28181 server.
@@ -77,6 +83,11 @@ func New(cfg config.GB28181Config, deviceCfg config.DeviceConfig, hub *h264.AUHu
 // SetTestMode enables test mode which skips REGISTER lifecycle.
 func (s *Server) SetTestMode() {
 	s.testMode = true
+}
+
+// SetRecordingIndex injects the recording index used for RecordInfo queries.
+func (s *Server) SetRecordingIndex(idx RecordingIndex) {
+	s.recordingIndex = idx
 }
 
 // Start starts the GB28181 server SIP listener and lifecycle.
@@ -208,7 +219,9 @@ func (s *Server) Start(ctx context.Context) error {
 				s.handleMessage(ctx, msg, addr)
 			case "ACK":
 				// No action needed - media is now flowing
-			case "SUBSCRIBE", "NOTIFY", "INFO", "OPTIONS":
+			case "INFO":
+				s.handleInfo(ctx, msg, addr)
+			case "SUBSCRIBE", "NOTIFY", "OPTIONS":
 				slog.Info("gb28181: received method, responding 200 OK", "method", msg.Method, "from", addr.String())
 				ok200 := Build200OK(msg, "", "")
 				if _, err := s.sipConn.WriteToUDP(ok200.Serialize(), addr); err != nil {
@@ -255,14 +268,18 @@ func (s *Server) sendSIP(data []byte, addr net.Addr) error {
 	return fmt.Errorf("unknown address type: %T", addr)
 }
 
-// parseSDP extracts the RTP media destination and SSRC from the INVITE SDP body.
+// parseSDP extracts the RTP media destination, SSRC, and session type
+// from the INVITE SDP body.
 // The destination IP comes from the c= line and the port from the m=video line.
-// Returns (mediaAddr "ip:port", ssrc, err).
-func parseSDP(body string) (string, uint32, error) {
+// The session type comes from the s= line (Play|Playback|Download,
+// case-insensitive, defaulting to "Play").
+// Returns (mediaAddr "ip:port", ssrc, sessionType, err).
+func parseSDP(body string) (string, uint32, string, error) {
 	var mediaIP string
 	var mediaPort int
 	var ssrc uint32
 	var ssrcFound bool
+	sessionType := "Play"
 
 	lines := strings.Split(body, "\n")
 	for _, line := range lines {
@@ -279,7 +296,7 @@ func parseSDP(body string) (string, uint32, error) {
 			if len(parts) >= 2 {
 				port, err := strconv.Atoi(parts[1])
 				if err != nil {
-					return "", 0, fmt.Errorf("invalid media port in m= line: %s: %w", parts[1], err)
+					return "", 0, "", fmt.Errorf("invalid media port in m= line: %s: %w", parts[1], err)
 				}
 				mediaPort = port
 			}
@@ -288,32 +305,48 @@ func parseSDP(body string) (string, uint32, error) {
 			ssrcStr := strings.TrimPrefix(line, "y=")
 			ssrcVal, err := strconv.ParseUint(ssrcStr, 10, 32)
 			if err != nil {
-				return "", 0, fmt.Errorf("invalid SSRC value: %s: %w", ssrcStr, err)
+				return "", 0, "", fmt.Errorf("invalid SSRC value: %s: %w", ssrcStr, err)
 			}
 			ssrc = uint32(ssrcVal)
 			ssrcFound = true
+		} else if strings.HasPrefix(line, "s=") {
+			sessionType = normalizeSessionType(strings.TrimSpace(strings.TrimPrefix(line, "s=")))
 		}
 	}
 
 	if !ssrcFound {
-		return "", 0, fmt.Errorf("SDP missing y= SSRC line")
+		return "", 0, "", fmt.Errorf("SDP missing y= SSRC line")
 	}
 	if mediaIP == "" || mediaPort == 0 {
-		return "", 0, fmt.Errorf("SDP missing c= media IP or m=video media port")
+		return "", 0, "", fmt.Errorf("SDP missing c= media IP or m=video media port")
 	}
 
-	return net.JoinHostPort(mediaIP, strconv.Itoa(mediaPort)), ssrc, nil
+	return net.JoinHostPort(mediaIP, strconv.Itoa(mediaPort)), ssrc, sessionType, nil
+}
+
+// normalizeSessionType maps an SDP s= value to a canonical session type.
+// Matching is case-insensitive; unknown or empty values default to "Play".
+func normalizeSessionType(v string) string {
+	switch strings.ToLower(v) {
+	case "playback":
+		return "Playback"
+	case "download":
+		return "Download"
+	default:
+		return "Play"
+	}
 }
 
 // buildDeviceSDP builds the device SDP answer for INVITE 200 OK.
+// sessionType is echoed in the s= line (Play|Playback|Download).
 // For TCP transport it emits TCP/RTP/AVP with a=setup:active (device actively
 // connects to the platform media port) and a=connection:new per GB/T 28181.
-func buildDeviceSDP(deviceID, localIP string, mediaPort int, ssrc uint32, transport string) string {
+func buildDeviceSDP(deviceID, localIP string, mediaPort int, ssrc uint32, transport, sessionType string) string {
 	if transport == "tcp" {
 		// TCP/RTP/AVP per GB/T 28181 with $-framing
 		return fmt.Sprintf(`v=0
 o=%s 0 0 IN IP4 %s
-s=Play
+s=%s
 c=IN IP4 %s
 t=0 0
 m=video %d TCP/RTP/AVP 0
@@ -322,19 +355,19 @@ a=connection:new
 a=sendonly
 a=rtpmap:96 PS/90000
 y=%d`,
-			deviceID, localIP, localIP, mediaPort, ssrc)
+			deviceID, localIP, sessionType, localIP, mediaPort, ssrc)
 	}
 	// UDP RTP/AVP (default)
 	return fmt.Sprintf(`v=0
 o=%s 0 0 IN IP4 %s
-s=Play
+s=%s
 c=IN IP4 %s
 t=0 0
 m=video %d RTP/AVP 96
 a=sendonly
 a=rtpmap:96 PS/90000
 y=%d`,
-		deviceID, localIP, localIP, mediaPort, ssrc)
+		deviceID, localIP, sessionType, localIP, mediaPort, ssrc)
 }
 
 // localIP detects a local IP address or returns 0.0.0.0 placeholder.
@@ -569,7 +602,7 @@ func (s *Server) handleInvite(ctx context.Context, msg SipMessage, fromAddr net.
 	// Parse SDP for RTP destination and SSRC — the media address comes from the
 	// SDP c=/m= lines, NEVER from the SIP peer address (streaming to the SIP
 	// port floods the platform's signaling socket).
-	mediaAddr, ssrc, err := parseSDP(msg.Body)
+	mediaAddr, ssrc, sessionType, err := parseSDP(msg.Body)
 	if err != nil {
 		slog.Warn("gb28181: failed to parse INVITE SDP", "error", err)
 		return
@@ -579,7 +612,42 @@ func (s *Server) handleInvite(ctx context.Context, msg SipMessage, fromAddr net.
 		slog.Warn("gb28181: invalid RTP destination from INVITE SDP", "addr", mediaAddr, "error", err)
 		return
 	}
-	slog.Info("gb28181: parsed SSRC and RTP destination from INVITE", "ssrc", ssrc, "rtp_dest", rtpDest.String())
+	slog.Info("gb28181: parsed SSRC and RTP destination from INVITE", "ssrc", ssrc, "rtp_dest", rtpDest.String(), "session", sessionType)
+
+	// Playback/Download sessions stream recorded segments instead of live
+	// AUs. Reject with 488 (Not Acceptable Here) when there is no
+	// playback-capable index or no segments cover the requested range -
+	// answering 200 OK without media would leave the platform waiting.
+	var playbackSegs []recording.SegmentInfo
+	var playbackRoot string
+	var startMs, endMs int64
+	if sessionType != "Play" {
+		startMs, endMs = parseSDPTimeRange(msg.Body)
+		if idx, ok := s.recordingIndex.(PlaybackIndex); ok {
+			playbackSegs = idx.Lookup(startMs, endMs)
+			playbackRoot = idx.Root()
+		}
+		if len(playbackSegs) == 0 {
+			slog.Warn("gb28181: playback INVITE has no covering recordings", "session", sessionType, "from", fromAddr.String())
+			to := msg.To
+			if !strings.Contains(to, "tag=") {
+				to = to + ";tag=" + dialogTag
+			}
+			reject := SipMessage{
+				StatusCode: 488,
+				Via:        msg.Via,
+				From:       msg.From,
+				To:         to,
+				CallID:     msg.CallID,
+				CSeq:       msg.CSeq,
+				Headers:    make(map[string]string),
+			}
+			if err := s.sendSIP(reject.Serialize(), fromAddr); err != nil {
+				slog.Warn("gb28181: failed to send 488", "error", err)
+			}
+			return
+		}
+	}
 
 	// Tear down any previous media session before starting a new one.
 	// Repeated INVITEs (NVR re-register auto-INVITE, NVR restart) would
@@ -602,6 +670,7 @@ func (s *Server) handleInvite(ctx context.Context, msg SipMessage, fromAddr net.
 		s.mediaTCPConn.Close()
 		s.mediaTCPConn = nil
 	}
+	s.playbackCtl = nil
 	s.mu.Unlock()
 
 	// Bind local media UDP on ephemeral port
@@ -624,7 +693,7 @@ func (s *Server) handleInvite(ctx context.Context, msg SipMessage, fromAddr net.
 		slog.Warn("gb28181: failed to determine local IP, falling back to interface scan", "error", err)
 		localIPAddr = localIP()
 	}
-	deviceSDP := buildDeviceSDP(s.cfg.DeviceID, localIPAddr, localMediaPort, ssrc, s.cfg.Transport)
+	deviceSDP := buildDeviceSDP(s.cfg.DeviceID, localIPAddr, localMediaPort, ssrc, s.cfg.Transport, sessionType)
 
 	// Send 200 OK with SDP answer
 	ok200 := Build200OK(msg, "application/sdp", deviceSDP)
@@ -647,6 +716,23 @@ func (s *Server) handleInvite(ctx context.Context, msg SipMessage, fromAddr net.
 		s.mu.Lock()
 		s.mediaTCPConn = mediaTCPConn
 		s.mu.Unlock()
+	}
+
+	if sessionType != "Play" {
+		// Playback/Download: stream recorded segments instead of live AUs.
+		mediaCtx, mediaCancel := context.WithCancel(ctx)
+		ctlCh := make(chan PlaybackControl, 4)
+		s.mu.Lock()
+		s.mediaCancel = mediaCancel
+		s.remoteRTPAddr = rtpDest
+		s.playbackCtl = ctlCh
+		s.mu.Unlock()
+		slog.Info("gb28181: playback media goroutine started", "session", sessionType, "remote", rtpDest.String(), "transport", s.cfg.Transport, "segments", len(playbackSegs))
+		go func() {
+			defer mediaCancel()
+			s.runPlayback(mediaCtx, mediaConn, mediaTCPConn, rtpDest, ssrc, playbackSegs, playbackRoot, startMs, endMs, sessionType, ctlCh)
+		}()
+		return
 	}
 
 	// Subscribe to AUHub
@@ -720,6 +806,7 @@ func (s *Server) handleBye(ctx context.Context, msg SipMessage, fromAddr net.Add
 		s.mediaCancel = nil
 	}
 	s.remoteRTPAddr = nil
+	s.playbackCtl = nil
 	s.mu.Unlock()
 
 	// Send 200 OK to BYE
@@ -732,7 +819,7 @@ func (s *Server) handleBye(ctx context.Context, msg SipMessage, fromAddr net.Add
 
 // handleMessage handles MESSAGE requests - dispatch MANSCDP XML, send 200 OK, and any queued response.
 func (s *Server) handleMessage(ctx context.Context, msg SipMessage, fromAddr net.Addr) {
-	ok200, queuedResp, err := DispatchInboundMessage(msg, s.devCtx)
+	ok200, queuedResp, err := DispatchInboundMessage(msg, s.devCtx, s.recordingIndex)
 	if err != nil {
 		slog.Warn("gb28181: failed to dispatch MESSAGE", "error", err)
 		return
@@ -758,4 +845,36 @@ func (s *Server) handleMessage(ctx context.Context, msg SipMessage, fromAddr net
 			slog.Warn("gb28181: failed to send queued MESSAGE response", "error", err)
 		}
 	}
+}
+
+// handleInfo handles SIP INFO requests. PlaybackControl bodies are routed
+// to the active playback goroutine via the control channel; everything else
+// (including controls for live sessions, per binding #8) is acknowledged
+// with 200 OK and ignored.
+func (s *Server) handleInfo(ctx context.Context, msg SipMessage, fromAddr net.Addr) {
+	ctl, ok := parsePlaybackControl(msg.Body)
+	if !ok {
+		slog.Debug("gb28181: INFO without PlaybackControl body", "from", fromAddr.String())
+		ok200 := Build200OK(msg, "", "")
+		s.sendSIP(ok200.Serialize(), fromAddr)
+		return
+	}
+	s.mu.Lock()
+	ctlCh := s.playbackCtl
+	s.mu.Unlock()
+	if ctlCh == nil {
+		// No active playback session (live session or none): controls are
+		// no-ops per binding #8 — acknowledge and ignore.
+		slog.Info("gb28181: PlaybackControl ignored (no active playback session)", "value", ctl.Value, "from", fromAddr.String())
+		ok200 := Build200OK(msg, "", "")
+		s.sendSIP(ok200.Serialize(), fromAddr)
+		return
+	}
+	select {
+	case ctlCh <- ctl:
+	default:
+		slog.Warn("gb28181: PlaybackControl dropped (control channel full)", "value", ctl.Value)
+	}
+	ok200 := Build200OK(msg, "", "")
+	s.sendSIP(ok200.Serialize(), fromAddr)
 }

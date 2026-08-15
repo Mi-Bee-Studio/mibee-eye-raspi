@@ -14,34 +14,34 @@ import (
 
 // CameraConfig holds camera capture settings.
 type CameraConfig struct {
-	Device      string  `yaml:"device"`       // Camera device path
-	Mode        string  `yaml:"mode"`         // Capture mode: "mtxrpicam" (default), "rpicamvid", or "rtsp"
-	RTSPURL     string  `yaml:"rtsp_url"`     // External RTSP URL when mode=rtsp
-	Width       int     `yaml:"width"`        // Capture width in pixels
-	Height      int     `yaml:"height"`       // Capture height in pixels
-	FPS         int     `yaml:"fps"`          // Frames per second
-	Codec       string  `yaml:"codec"`        // Video codec (h264)
-	Bitrate     int     `yaml:"bitrate"`      // Target bitrate in bps
-	Brightness  float64 `yaml:"brightness"`   // -1.0 to 1.0
-	Contrast    float64 `yaml:"contrast"`     // 0.0 to 32.0
-	Saturation  float64 `yaml:"saturation"`   // 0.0 to 32.0
-	Sharpness   float64       `yaml:"sharpness"`    // 0.0 to 16.0
-	IDRPeriod       int           `yaml:"idr_period"`         // Keyframe interval (1=every frame, 15=every 15th)
-	BinPath         string        `yaml:"bin_path"`           // Path to mtxrpicam binary
-	FrameBufferSize int           `yaml:"frame_buffer_size"`  // Frame channel buffer capacity
-	MaxBackoff      time.Duration `yaml:"max_backoff"`        // Max subprocess restart backoff
+	Device          string        `yaml:"device"`            // Camera device path
+	Mode            string        `yaml:"mode"`              // Capture mode: "mtxrpicam" (default), "rpicamvid", or "rtsp"
+	RTSPURL         string        `yaml:"rtsp_url"`          // External RTSP URL when mode=rtsp
+	Width           int           `yaml:"width"`             // Capture width in pixels
+	Height          int           `yaml:"height"`            // Capture height in pixels
+	FPS             int           `yaml:"fps"`               // Frames per second
+	Codec           string        `yaml:"codec"`             // Video codec (h264)
+	Bitrate         int           `yaml:"bitrate"`           // Target bitrate in bps
+	Brightness      float64       `yaml:"brightness"`        // -1.0 to 1.0
+	Contrast        float64       `yaml:"contrast"`          // 0.0 to 32.0
+	Saturation      float64       `yaml:"saturation"`        // 0.0 to 32.0
+	Sharpness       float64       `yaml:"sharpness"`         // 0.0 to 16.0
+	IDRPeriod       int           `yaml:"idr_period"`        // Keyframe interval (1=every frame, 15=every 15th)
+	BinPath         string        `yaml:"bin_path"`          // Path to mtxrpicam binary
+	FrameBufferSize int           `yaml:"frame_buffer_size"` // Frame channel buffer capacity
+	MaxBackoff      time.Duration `yaml:"max_backoff"`       // Max subprocess restart backoff
 }
 
 // RTSPConfig holds RTSP server settings.
 type RTSPConfig struct {
-	Port     int    `yaml:"port"`     // RTSP port
-	Username string `yaml:"username"` // RTSP authentication username
-	Password string `yaml:"password"` // RTSP authentication password
-	SubscriberBufferSize int `yaml:"subscriber_buffer_size"` // AUHub subscriber channel buffer
-	WriteQueueSize      int `yaml:"write_queue_size"`        // gortsplib write queue size
-	EnableUDP           bool `yaml:"enable_udp"`             // Enable UDP transport (default: true, needed for NVR clients)
-	UDPRTPPort          int    `yaml:"udp_rtp_port"`          // UDP RTP port (default: 8000)
-	UDPRTCPPort         int    `yaml:"udp_rtcp_port"`         // UDP RTCP port (default: 8001)
+	Port                 int    `yaml:"port"`                   // RTSP port
+	Username             string `yaml:"username"`               // RTSP authentication username
+	Password             string `yaml:"password"`               // RTSP authentication password
+	SubscriberBufferSize int    `yaml:"subscriber_buffer_size"` // AUHub subscriber channel buffer
+	WriteQueueSize       int    `yaml:"write_queue_size"`       // gortsplib write queue size
+	EnableUDP            bool   `yaml:"enable_udp"`             // Enable UDP transport (default: true, needed for NVR clients)
+	UDPRTPPort           int    `yaml:"udp_rtp_port"`           // UDP RTP port (default: 8000)
+	UDPRTCPPort          int    `yaml:"udp_rtcp_port"`          // UDP RTCP port (default: 8001)
 }
 
 // ONVIFConfig holds ONVIF server settings.
@@ -55,10 +55,10 @@ type ONVIFConfig struct {
 // The web UI serves a single-page admin panel for ONVIF config and camera params.
 // When Username/Password are empty, the web server reuses the ONVIF credentials.
 type WebConfig struct {
-	Enabled        bool     `yaml:"enabled"`
-	Port           int      `yaml:"port"`
-	Username       string   `yaml:"username"`
-	Password       string   `yaml:"password"`
+	Enabled           bool          `yaml:"enabled"`
+	Port              int           `yaml:"port"`
+	Username          string        `yaml:"username"`
+	Password          string        `yaml:"password"`
 	AllowedOrigins    []string      `yaml:"allowed_origins"`
 	ReadHeaderTimeout time.Duration `yaml:"read_header_timeout"`
 	ReadTimeout       time.Duration `yaml:"read_timeout"`
@@ -66,14 +66,13 @@ type WebConfig struct {
 	IdleTimeout       time.Duration `yaml:"idle_timeout"`
 }
 
-
 // DeviceConfig holds ONVIF device information.
 type DeviceConfig struct {
-	Name         string `yaml:"name"`         // Camera friendly name
-	Manufacturer string `yaml:"manufacturer"` // Device manufacturer
-	Model        string `yaml:"model"`        // Device model
-	Firmware     string `yaml:"firmware"`     // Firmware version
-	HardwareID   string `yaml:"hardware_id"`  // Hardware identifier
+	Name         string `yaml:"name"`          // Camera friendly name
+	Manufacturer string `yaml:"manufacturer"`  // Device manufacturer
+	Model        string `yaml:"model"`         // Device model
+	Firmware     string `yaml:"firmware"`      // Firmware version
+	HardwareID   string `yaml:"hardware_id"`   // Hardware identifier
 	SerialNumber string `yaml:"serial_number"` // Device serial number
 }
 
@@ -100,9 +99,10 @@ type RTMPConfig struct {
 	URL        string `yaml:"url"`         // RTMP server URL (e.g. rtmp://host:port/app/streamkey)
 	MaxRetries int    `yaml:"max_retries"` // Max reconnection attempts (default: 10)
 }
+
 // HLSConfig holds HLS live streaming settings.
 type HLSConfig struct {
-	Enabled         bool          `yaml:"enabled"`         // Enable HLS server (default: false)
+	Enabled         bool          `yaml:"enabled"`          // Enable HLS server (default: false)
 	SegmentDuration time.Duration `yaml:"segment_duration"` // Target segment duration (default: 2s)
 }
 
@@ -118,53 +118,64 @@ type GB28181Config struct {
 	RegisterIntervalSecs  int    `yaml:"register_interval_secs"`  // SIP REGISTER interval (seconds)
 	HeartbeatIntervalSecs int    `yaml:"heartbeat_interval_secs"` // SIP keepalive heartbeat interval (seconds)
 	HeartbeatTimeoutCount int    `yaml:"heartbeat_timeout_count"` // Missed heartbeats before declaring timeout
-	Transport            string `yaml:"transport"`               // SIP transport: udp (default) or tcp
+	Transport             string `yaml:"transport"`               // SIP transport: udp (default) or tcp
 }
+
+// RecordingConfig holds local recording settings.
+type RecordingConfig struct {
+	Enabled       bool   `yaml:"enabled"`        // Enable continuous local recording (default: false)
+	StoragePath   string `yaml:"storage_path"`   // Recording root directory (default: recordings)
+	SegmentSecs   int    `yaml:"segment_secs"`   // Target segment duration in seconds (default: 600)
+	RetentionDays int    `yaml:"retention_days"` // Delete segments older than this many days (0 = infinite)
+	MaxStorageMB  int    `yaml:"max_storage_mb"` // Prune oldest segments above this cap in MB (0 = unlimited)
+}
+
 // Config is the top-level configuration for MiBee Eye.
 type Config struct {
-	Camera  CameraConfig  `yaml:"camera"`
-	RTSP    RTSPConfig    `yaml:"rtsp"`
-	ONVIF   ONVIFConfig   `yaml:"onvif"`
-	Device  DeviceConfig  `yaml:"device"`
-	Logging LoggingConfig `yaml:"logging"`
-	Web     WebConfig     `yaml:"web"`
-	Metrics MetricsConfig `yaml:"metrics"`
-	Snapshot SnapshotConfig `yaml:"snapshot"`
-	RTMP     RTMPConfig     `yaml:"rtmp"`
-	HLS      HLSConfig      `yaml:"hls"`
-	GB28181  GB28181Config  `yaml:"gb28181"`
+	Camera    CameraConfig    `yaml:"camera"`
+	RTSP      RTSPConfig      `yaml:"rtsp"`
+	ONVIF     ONVIFConfig     `yaml:"onvif"`
+	Device    DeviceConfig    `yaml:"device"`
+	Logging   LoggingConfig   `yaml:"logging"`
+	Web       WebConfig       `yaml:"web"`
+	Metrics   MetricsConfig   `yaml:"metrics"`
+	Snapshot  SnapshotConfig  `yaml:"snapshot"`
+	RTMP      RTMPConfig      `yaml:"rtmp"`
+	HLS       HLSConfig       `yaml:"hls"`
+	GB28181   GB28181Config   `yaml:"gb28181"`
+	Recording RecordingConfig `yaml:"recording"`
 }
 
 // DefaultConfig returns a Config with all default values.
 func DefaultConfig() *Config {
 	return &Config{
 		Camera: CameraConfig{
-			Device:     "/dev/video0",
-			Mode:       "mtxrpicam",
-			RTSPURL:    "",
-			Width:      1280,
-			Height:     720,
-			FPS:        15,
-			Codec:      "h264",
-			Bitrate:    2_000_000,
-			Brightness: 0.0,
-			Contrast:   1.0,
-			Saturation: 1.0,
-			Sharpness:      1.0,
+			Device:          "/dev/video0",
+			Mode:            "mtxrpicam",
+			RTSPURL:         "",
+			Width:           1280,
+			Height:          720,
+			FPS:             15,
+			Codec:           "h264",
+			Bitrate:         2_000_000,
+			Brightness:      0.0,
+			Contrast:        1.0,
+			Saturation:      1.0,
+			Sharpness:       1.0,
 			IDRPeriod:       15,
 			BinPath:         "deploy/bin/mtxrpicam",
 			FrameBufferSize: 30,
 			MaxBackoff:      30 * time.Second,
 		},
 		RTSP: RTSPConfig{
-			Port:               8554,
-			Username:           "",
-			Password:           "",
+			Port:                 8554,
+			Username:             "",
+			Password:             "",
 			SubscriberBufferSize: 64,
 			WriteQueueSize:       2048,
-			EnableUDP:           true,
-			UDPRTPPort:          8000,
-			UDPRTCPPort:         8001,
+			EnableUDP:            true,
+			UDPRTPPort:           8000,
+			UDPRTCPPort:          8001,
 		},
 		ONVIF: ONVIFConfig{
 			Port:     8080,
@@ -183,13 +194,13 @@ func DefaultConfig() *Config {
 			Level: "info",
 		},
 		Web: WebConfig{
-			Enabled:        true,
-			Port:               8088,
-			AllowedOrigins:     []string{"*"},
-			ReadHeaderTimeout:  5 * time.Second,
-			ReadTimeout:        10 * time.Second,
-			WriteTimeout:       30 * time.Second,
-			IdleTimeout:        120 * time.Second,
+			Enabled:           true,
+			Port:              8088,
+			AllowedOrigins:    []string{"*"},
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       10 * time.Second,
+			WriteTimeout:      30 * time.Second,
+			IdleTimeout:       120 * time.Second,
 		},
 		Metrics: MetricsConfig{
 			Enabled: true,
@@ -221,8 +232,16 @@ func DefaultConfig() *Config {
 			HeartbeatTimeoutCount: 3,
 			Transport:             "udp",
 		},
+		Recording: RecordingConfig{
+			Enabled:       false,
+			StoragePath:   "recordings",
+			SegmentSecs:   600,
+			RetentionDays: 3,
+			MaxStorageMB:  8192,
+		},
 	}
 }
+
 // Load reads a YAML configuration file at path and returns a Config.
 // Values from the file are merged over DefaultConfig().
 // Environment variables with the MIBEE_EYE_ prefix override both.
@@ -328,13 +347,19 @@ func applyEnvOverrides(cfg *Config) {
 	overrideInt("MIBEE_EYE_GB28181_HEARTBEAT_INTERVAL_SECS", &cfg.GB28181.HeartbeatIntervalSecs)
 	overrideInt("MIBEE_EYE_GB28181_HEARTBEAT_TIMEOUT_COUNT", &cfg.GB28181.HeartbeatTimeoutCount)
 	overrideString("MIBEE_EYE_GB28181_TRANSPORT", &cfg.GB28181.Transport)
+	// Recording section
+	overrideBool("MIBEE_EYE_RECORDING_ENABLED", &cfg.Recording.Enabled)
+	overrideString("MIBEE_EYE_RECORDING_STORAGE_PATH", &cfg.Recording.StoragePath)
+	overrideInt("MIBEE_EYE_RECORDING_SEGMENT_SECS", &cfg.Recording.SegmentSecs)
+	overrideInt("MIBEE_EYE_RECORDING_RETENTION_DAYS", &cfg.Recording.RetentionDays)
+	overrideInt("MIBEE_EYE_RECORDING_MAX_STORAGE_MB", &cfg.Recording.MaxStorageMB)
 }
 
 // Sentinel errors for config validation.
 var (
-	errMustBePositive  = errors.New("must be positive")
-	errInvalidCodec    = errors.New("codec must be h264 or h265")
-	errInvalidLogLevel = errors.New("level must be debug, info, warn, or error")
+	errMustBePositive   = errors.New("must be positive")
+	errInvalidCodec     = errors.New("codec must be h264 or h265")
+	errInvalidLogLevel  = errors.New("level must be debug, info, warn, or error")
 	errInvalidTransport = errors.New("gb28181 transport must be udp or tcp")
 )
 
@@ -423,6 +448,15 @@ func (c *Config) Validate() error {
 		c.GB28181.Transport = "udp"
 	default:
 		return fmt.Errorf("config.gb28181.transport: %w", errInvalidTransport)
+	}
+	if c.Recording.SegmentSecs < 60 {
+		c.Recording.SegmentSecs = 60
+	}
+	if c.Recording.RetentionDays < 0 {
+		return fmt.Errorf("config.recording.retention_days: must not be negative")
+	}
+	if c.Recording.MaxStorageMB < 0 {
+		return fmt.Errorf("config.recording.max_storage_mb: must not be negative")
 	}
 	return nil
 }

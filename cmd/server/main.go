@@ -21,9 +21,10 @@ import (
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/metrics"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/netutil"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/onvif"
+	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/recording"
+	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/rtmp"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/rtsp"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/web"
-	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/rtmp"
 )
 
 var (
@@ -72,8 +73,8 @@ func (a *configAdapter) DeviceFirmware() string     { return a.cfg.Device.Firmwa
 func (a *configAdapter) DeviceHardwareID() string   { return a.cfg.Device.HardwareID }
 func (a *configAdapter) DeviceSerialNumber() string { return a.cfg.Device.SerialNumber }
 func (a *configAdapter) LoggingLevel() string       { return a.cfg.Logging.Level }
-func (a *configAdapter) SnapshotEnabled() bool { return a.cfg.Snapshot.Enabled }
-func (a *configAdapter) SnapshotQuality() int  { return a.cfg.Snapshot.Quality }
+func (a *configAdapter) SnapshotEnabled() bool      { return a.cfg.Snapshot.Enabled }
+func (a *configAdapter) SnapshotQuality() int       { return a.cfg.Snapshot.Quality }
 
 func main() {
 	configPath := flag.String("config", "configs/config.yaml", "path to config file")
@@ -185,16 +186,28 @@ func main() {
 			// Update SPS/PPS cache.
 			hasSPS, hasPPS, hasIDR := false, false, false
 			for _, n := range nalus {
-				if n.IsSPS { cachedSPS = n.Data; hasSPS = true }
-				if n.IsPPS { cachedPPS = n.Data; hasPPS = true }
-				if n.IsIDR { hasIDR = true }
+				if n.IsSPS {
+					cachedSPS = n.Data
+					hasSPS = true
+				}
+				if n.IsPPS {
+					cachedPPS = n.Data
+					hasPPS = true
+				}
+				if n.IsIDR {
+					hasIDR = true
+				}
 			}
 
 			// Inject cached SPS+PPS before IDR if missing.
 			if hasIDR && (!hasSPS || !hasPPS) && cachedSPS != nil && cachedPPS != nil {
 				injected := make([]h264.NALU, 0, len(nalus)+2)
-				if !hasSPS { injected = append(injected, h264.NALU{Type: 7, Data: cachedSPS, IsSPS: true}) }
-				if !hasPPS { injected = append(injected, h264.NALU{Type: 8, Data: cachedPPS, IsPPS: true}) }
+				if !hasSPS {
+					injected = append(injected, h264.NALU{Type: 7, Data: cachedSPS, IsSPS: true})
+				}
+				if !hasPPS {
+					injected = append(injected, h264.NALU{Type: 8, Data: cachedPPS, IsPPS: true})
+				}
 				nalus = append(injected, nalus...)
 			}
 
@@ -348,10 +361,31 @@ func main() {
 		}
 	}()
 
+	// --- Step 6.4: Local recording ---
+	var recWriter *recording.Writer
+	if cfg.Recording.Enabled {
+		recWriter = recording.NewWriter(auHub, cfg.Recording)
+		gb28181.RecordActive = recWriter.Active
+		go func() {
+			if err := recWriter.Run(ctx); err != nil {
+				slog.Error("recording: writer exited", "error", err)
+			}
+		}()
+		slog.Info("recording: enabled", "path", cfg.Recording.StoragePath, "segment_secs", cfg.Recording.SegmentSecs, "retention_days", cfg.Recording.RetentionDays, "max_storage_mb", cfg.Recording.MaxStorageMB)
+		ret := recording.NewRetention(cfg.Recording, recWriter.Index(), cfg.Recording.StoragePath)
+		go ret.Run(ctx, 10*time.Minute)
+	} else {
+		slog.Info("recording: disabled")
+	}
+
 	// --- Step 6.5: GB/T 28181 device ---
 	var gbServer *gb28181.Server
 	if cfg.GB28181.Enabled {
 		gbServer = gb28181.New(cfg.GB28181, cfg.Device, auHub)
+		// Wire the recording index for RecordInfo queries (nil when recording disabled).
+		if recWriter != nil {
+			gbServer.SetRecordingIndex(recWriter.Index())
+		}
 		go func() {
 			if err := gbServer.Start(ctx); err != nil {
 				slog.Error("gb28181 server", "error", err)
@@ -379,7 +413,7 @@ func main() {
 			}
 		}()
 		defer metricsServer.Close()
-		
+
 		// Poll loop: snapshot camera drops, AUHub drops, RTSP clients, camera alive
 		go func() {
 			ticker := time.NewTicker(5 * time.Second)

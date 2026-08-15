@@ -133,7 +133,9 @@ func handleTCPConnection(ctx context.Context, conn net.Conn, s *Server) {
 				s.handleMessage(ctx, msg, tcpAddr)
 			case "ACK":
 				// No action needed - media is now flowing
-			case "SUBSCRIBE", "NOTIFY", "INFO", "OPTIONS":
+			case "INFO":
+				s.handleInfo(ctx, msg, tcpAddr)
+			case "SUBSCRIBE", "NOTIFY", "OPTIONS":
 				slog.Info("gb28181: received method, responding 200 OK", "method", msg.Method, "from", remoteAddr)
 				ok200 := Build200OK(msg, "", "")
 				if err := s.sendSIP(ok200.Serialize(), tcpAddr); err != nil {

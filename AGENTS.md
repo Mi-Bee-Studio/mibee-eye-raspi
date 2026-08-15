@@ -44,13 +44,14 @@ mtxrpicam subprocess (CSI capture, H.264 encode)
 camera.RPiCamera → h264.Parser → [SPS/PPS cache + IDR injection]
     ↓
 h264.AUHub (fan-out, non-blocking drop)
-    ↓ ↓ ↓ ↓ ↓ ↓
-RTSP   Web/MSE   Snapshot   HLS*   RTMP*   GB28181
-(gortsplib v5)   (rpicam-still + IDR fallback)   (*disabled by default)   (SIP + RTP push)
+    ↓ ↓ ↓ ↓ ↓ ↓ ↓
+RTSP   Web/MSE   Snapshot   HLS*   RTMP*   GB28181   Recording*
+(gortsplib v5)   (rpicam-still + IDR fallback)   (*disabled by default)   (SIP + RTP push, live/playback/download)   (H.264 segments + index.jsonl)
 
 ONVIF SOAP server (:8080) — Device, Media, Imaging services
 WS-Discovery UDP multicast (239.255.255.250:3702)
-GB28181 SIP server (optional) — SIP signaling, RTP PS stream push
+GB28181 SIP server (optional) — SIP signaling (UDP/TCP), RTP PS live/playback/download push, RecordInfo, SIP INFO playback control
+Local recording (optional) — H.264 segments recordings/YYYY-MM-DD/HH/MMSS.h264 + append-only index.jsonl, retention + storage cap
 Web Admin UI (:8088) — MSE live preview, imaging controls, config editor
 ```
 
@@ -62,6 +63,7 @@ Web Admin UI (:8088) — MSE live preview, imaging controls, config editor
 4. ParamManager (validates ONVIF imaging params, maps to camera)
 5. ONVIF server (Device + Media + Imaging + Snapshot handlers)
 6. WS-Discovery (UDP multicast responder)
+6.4. Local recording (optional, disabled by default) — Writer subscribes AUHub, retention goroutine prunes by age/cap
 6.5. GB/T 28181 device (optional, SIP registration + RTP PS stream push)
 7. Web UI (optional, enabled by default)
 8. HLS (optional, disabled by default)
@@ -121,7 +123,7 @@ NVR auto-selects first profile, probes RTSP DESCRIBE for actual encoding, has ra
 
 ## Config
 
-YAML at `~/mibee-eye/config.yaml`. Env vars override with `MIBEE_EYE_<SECTION>_<FIELD>` pattern. Sections: `camera`, `rtsp`, `onvif`, `device`, `web`, `metrics`, `snapshot`, `rtmp`, `hls`, `logging`.
+YAML at `~/mibee-eye/config.yaml`. Env vars override with `MIBEE_EYE_<SECTION>_<FIELD>` pattern. Sections: `camera`, `rtsp`, `onvif`, `device`, `web`, `metrics`, `snapshot`, `rtmp`, `hls`, `gb28181`, `recording`, `logging`.
 
 ONVIF password is **required** — service refuses to start if empty. Set via `onvif.password` in config or `MIBEE_EYE_ONVIF_PASSWORD` env var.
 
@@ -158,6 +160,7 @@ ONVIF password is **required** — service refuses to start if empty. Set via `o
 | Fix auth | `internal/onvif/auth.go` (WS-UsernameToken: PasswordText + PasswordDigest SHA1) |
 | Change web UI | `internal/web/static/` (app.js, index.html, style.css — embedded via `//go:embed`) |
 | Fix SPS/PPS injection | `cmd/server/main.go` (goroutine in Step 2, caches SPS/PPS, injects before IDR) |
+| Add recording settings | `internal/recording/` (Writer/Index/Retention) + `internal/config/config.go` (RecordingConfig) |
 | Add GB28181 settings | `internal/gb28181/` (SIP server, RTP push, PS mux) + `internal/config/config.go` (GB28181Config struct) + `internal/web/static/app.js` (settings panel) |
 
 ## GB28181 Interop Notes (NVR-tested)
