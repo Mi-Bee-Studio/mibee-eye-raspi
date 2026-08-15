@@ -576,3 +576,402 @@ func TestServer_PlaybackInviteWithoutCoveringSegmentsGets488(t *testing.T) {
 		t.Fatalf("expected 488 Not Acceptable Here, got %d", resp.StatusCode)
 	}
 }
+
+// buildInfo builds a synthetic SIP INFO request carrying a MANSCDP body.
+func buildInfo(callID, from, to, contact, body string) SipMessage {
+	return SipMessage{
+		Method:      "INFO",
+		RequestURI:  "sip:3402000000@3402000000",
+		From:        from,
+		To:          to,
+		CallID:      callID,
+		CSeq:        "3 INFO",
+		Contact:     contact,
+		Via:         "SIP/2.0/UDP 192.168.1.100:5060;rport;branch=z9hG4bK-24680",
+		ContentType: "Application/MANSCDP+xml",
+		Body:        body,
+		Headers:     make(map[string]string),
+	}
+}
+
+// sendInfo writes an INFO request on conn and reads the server's 200 OK.
+func sendInfo(t *testing.T, conn *net.UDPConn, info SipMessage) {
+	t.Helper()
+	if _, err := conn.Write(info.Serialize()); err != nil {
+		t.Fatalf("send INFO: %v", err)
+	}
+	buf := make([]byte, 4096)
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, _, err := conn.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("read INFO 200 OK: %v", err)
+	}
+	resp, err := Parse(buf[:n])
+	if err != nil {
+		t.Fatalf("parse INFO 200 OK: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200 OK for INFO, got %d", resp.StatusCode)
+	}
+}
+
+// playbackControlBody builds a PlaybackControl INFO body.
+func playbackControlBody(value, startTime, endTime, speed, scale string) string {
+	info := ""
+	if value != "" {
+		info += "<ControlValue>" + value + "</ControlValue>"
+	}
+	if startTime != "" {
+		info += "<StartTime>" + startTime + "</StartTime>"
+	}
+	if endTime != "" {
+		info += "<EndTime>" + endTime + "</EndTime>"
+	}
+	if speed != "" {
+		info += "<Speed>" + speed + "</Speed>"
+	}
+	if scale != "" {
+		info += "<Scale>" + scale + "</Scale>"
+	}
+	return "<Control><CmdType>PlaybackControl</CmdType><SN>1</SN><DeviceID>d</DeviceID><Info>" + info + "</Info></Control>"
+}
+
+// TestServer_PlaybackPauseStopsRtpAndPlayResumes verifies a PAUSE INFO
+// halts RTP delivery and a subsequent PLAY INFO resumes it.
+func TestServer_PlaybackPauseStopsRtpAndPlayResumes(t *testing.T) {
+	dir := t.TempDir()
+	frames := []synthFrame{{0, true}}
+	for i := 1; i < 20; i++ {
+		frames = append(frames, synthFrame{time.Duration(i) * 100 * time.Millisecond, false})
+	}
+	segs := writeSyntheticRecording(t, dir, frames)
+	idx := &testRecordingIndex{root: dir, segments: segs}
+
+	_, sipPort, cancel := startPlaybackServer(t, idx)
+	defer cancel()
+
+	mediaSock, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatalf("bind media socket: %v", err)
+	}
+	defer mediaSock.Close()
+	mediaPort := mediaSock.LocalAddr().(*net.UDPAddr).Port
+
+	invite := buildPlaybackInvite("test-call-pause@example.com", "Playback", segs[0].StartMS/1000, segs[0].EndMS/1000+1, mediaPort)
+	clientConn, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: sipPort})
+	if err != nil {
+		t.Fatalf("dial server: %v", err)
+	}
+	defer clientConn.Close()
+
+	if _, err := clientConn.Write(invite.Serialize()); err != nil {
+		t.Fatalf("send INVITE: %v", err)
+	}
+	respBuf := make([]byte, 4096)
+	clientConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := clientConn.ReadFromUDP(respBuf); err != nil {
+		t.Fatalf("read 200 OK: %v", err)
+	}
+
+	// Receive 3 frames to confirm streaming is flowing.
+	mediaSock.SetReadDeadline(time.Now().Add(5 * time.Second))
+	buf := make([]byte, 2048)
+	for i := 0; i < 3; i++ {
+		if _, _, err := mediaSock.ReadFromUDP(buf); err != nil {
+			t.Fatalf("read frame %d: %v", i, err)
+		}
+	}
+
+	// Send PAUSE.
+	sendInfo(t, clientConn, buildInfo("test-call-pause@example.com",
+		"<sip:34020000012000000001@3402000000>;tag=pb001",
+		"<sip:34020000001320000001@3402000000>",
+		"<sip:34020000012000000001@127.0.0.1:5060>",
+		playbackControlBody("PAUSE", "", "", "", "")))
+
+	// No RTP within 300ms after PAUSE.
+	mediaSock.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	for {
+		if _, _, err := mediaSock.ReadFromUDP(buf); err != nil {
+			break // timeout — paused, good
+		}
+		t.Fatal("RTP still arriving after PAUSE")
+	}
+
+	// Send PLAY to resume.
+	sendInfo(t, clientConn, buildInfo("test-call-pause@example.com",
+		"<sip:34020000012000000001@3402000000>;tag=pb001",
+		"<sip:34020000001320000001@3402000000>",
+		"<sip:34020000012000000001@127.0.0.1:5060>",
+		playbackControlBody("PLAY", "", "", "", "")))
+
+	// RTP resumes: next packet arrives within 500ms.
+	mediaSock.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	if _, _, err := mediaSock.ReadFromUDP(buf); err != nil {
+		t.Fatalf("no RTP after PLAY resume: %v", err)
+	}
+}
+
+// TestServer_PlaybackSeekToKeyframe verifies a PLAY INFO with StartTime
+// seeks mid-recording: the first packet after the seek is a keyframe (PSM).
+func TestServer_PlaybackSeekToKeyframe(t *testing.T) {
+	dir := t.TempDir()
+	frames := []synthFrame{{0, true}}
+	for i := 1; i < 20; i++ {
+		frames = append(frames, synthFrame{time.Duration(i) * 100 * time.Millisecond, false})
+	}
+	// Second keyframe at 2s.
+	frames = append(frames, synthFrame{2000 * time.Millisecond, true})
+	for i := 21; i < 30; i++ {
+		frames = append(frames, synthFrame{time.Duration(i) * 100 * time.Millisecond, false})
+	}
+	segs := writeSyntheticRecording(t, dir, frames)
+	idx := &testRecordingIndex{root: dir, segments: segs}
+
+	_, sipPort, cancel := startPlaybackServer(t, idx)
+	defer cancel()
+
+	mediaSock, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatalf("bind media socket: %v", err)
+	}
+	defer mediaSock.Close()
+	mediaPort := mediaSock.LocalAddr().(*net.UDPAddr).Port
+
+	invite := buildPlaybackInvite("test-call-seek@example.com", "Playback", segs[0].StartMS/1000, segs[0].EndMS/1000+1, mediaPort)
+	clientConn, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: sipPort})
+	if err != nil {
+		t.Fatalf("dial server: %v", err)
+	}
+	defer clientConn.Close()
+
+	if _, err := clientConn.Write(invite.Serialize()); err != nil {
+		t.Fatalf("send INVITE: %v", err)
+	}
+	respBuf := make([]byte, 4096)
+	clientConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := clientConn.ReadFromUDP(respBuf); err != nil {
+		t.Fatalf("read 200 OK: %v", err)
+	}
+
+	// Receive 3 frames (stream flowing from the start).
+	mediaSock.SetReadDeadline(time.Now().Add(5 * time.Second))
+	buf := make([]byte, 2048)
+	for i := 0; i < 3; i++ {
+		if _, _, err := mediaSock.ReadFromUDP(buf); err != nil {
+			t.Fatalf("read frame %d: %v", i, err)
+		}
+	}
+
+	// Seek to the keyframe at 2s (base + 2000ms).
+	seekMs := segs[0].StartMS + 2000
+	sendInfo(t, clientConn, buildInfo("test-call-seek@example.com",
+		"<sip:34020000012000000001@3402000000>;tag=pb001",
+		"<sip:34020000001320000001@3402000000>",
+		"<sip:34020000012000000001@127.0.0.1:5060>",
+		playbackControlBody("PLAY", formatGBTime(seekMs), "", "", "")))
+
+	// First packet after seek must be a keyframe (PSM present).
+	mediaSock.SetReadDeadline(time.Now().Add(5 * time.Second))
+	n, _, err := mediaSock.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("read first frame after seek: %v", err)
+	}
+	if !bytes.Contains(buf[:n], []byte{0x00, 0x00, 0x01, 0xBB}) {
+		t.Fatal("first frame after seek is not a keyframe (no PSM)")
+	}
+}
+
+// TestServer_PlaybackSpeed4x verifies a Speed=4 control paces frames at
+// ~25ms (100ms nominal / 4) instead of the recorded 100ms interval.
+func TestServer_PlaybackSpeed4x(t *testing.T) {
+	dir := t.TempDir()
+	frames := []synthFrame{{0, true}}
+	for i := 1; i < 40; i++ {
+		frames = append(frames, synthFrame{time.Duration(i) * 100 * time.Millisecond, false})
+	}
+	segs := writeSyntheticRecording(t, dir, frames)
+	idx := &testRecordingIndex{root: dir, segments: segs}
+
+	_, sipPort, cancel := startPlaybackServer(t, idx)
+	defer cancel()
+
+	mediaSock, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatalf("bind media socket: %v", err)
+	}
+	defer mediaSock.Close()
+	mediaPort := mediaSock.LocalAddr().(*net.UDPAddr).Port
+
+	invite := buildPlaybackInvite("test-call-speed@example.com", "Playback", segs[0].StartMS/1000, segs[0].EndMS/1000+1, mediaPort)
+	clientConn, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: sipPort})
+	if err != nil {
+		t.Fatalf("dial server: %v", err)
+	}
+	defer clientConn.Close()
+
+	if _, err := clientConn.Write(invite.Serialize()); err != nil {
+		t.Fatalf("send INVITE: %v", err)
+	}
+	respBuf := make([]byte, 4096)
+	clientConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := clientConn.ReadFromUDP(respBuf); err != nil {
+		t.Fatalf("read 200 OK: %v", err)
+	}
+
+	// Receive 3 frames at nominal 100ms pacing.
+	mediaSock.SetReadDeadline(time.Now().Add(5 * time.Second))
+	buf := make([]byte, 2048)
+	for i := 0; i < 3; i++ {
+		if _, _, err := mediaSock.ReadFromUDP(buf); err != nil {
+			t.Fatalf("read frame %d: %v", i, err)
+		}
+	}
+
+	// Send Speed=4 control.
+	sendInfo(t, clientConn, buildInfo("test-call-speed@example.com",
+		"<sip:34020000012000000001@3402000000>;tag=pb001",
+		"<sip:34020000001320000001@3402000000>",
+		"<sip:34020000012000000001@127.0.0.1:5060>",
+		playbackControlBody("PLAY", "", "", "4", "")))
+
+	// Measure inter-packet gaps after the speed change. The first frame
+	// after the control re-anchors pacing; measure subsequent gaps.
+	var arrivals []time.Time
+	mediaSock.SetReadDeadline(time.Now().Add(5 * time.Second))
+	for len(arrivals) < 6 {
+		if _, _, err := mediaSock.ReadFromUDP(buf); err != nil {
+			t.Fatalf("read frame after speed change: %v", err)
+		}
+		arrivals = append(arrivals, time.Now())
+	}
+	var total time.Duration
+	for i := 2; i < len(arrivals); i++ {
+		gap := arrivals[i].Sub(arrivals[i-1])
+		total += gap
+		if gap > 60*time.Millisecond {
+			t.Errorf("gap %d = %v, want ~25ms at 4x speed", i, gap)
+		}
+	}
+	if avg := total / time.Duration(len(arrivals)-2); avg > 45*time.Millisecond {
+		t.Errorf("avg gap = %v, want ~25ms at 4x speed", avg)
+	}
+}
+
+// TestServer_InfoOnLiveSessionAcknowledged verifies a PAUSE INFO on a live
+// (s=Play) session is acknowledged with 200 OK and live RTP keeps flowing.
+func TestServer_InfoOnLiveSessionAcknowledged(t *testing.T) {
+	hub := h264.NewAUHub()
+	cfg := config.GB28181Config{
+		DeviceID:              "34020000001320000001",
+		ChannelID:             "34020000001320000001",
+		SIPDomain:             "3402000000",
+		Password:              "12345678",
+		LocalSIPPort:          0,
+		PlatformSIPAddress:    "127.0.0.1",
+		PlatformSIPPort:       15070,
+		RegisterIntervalSecs:  60,
+		HeartbeatIntervalSecs: 60,
+		HeartbeatTimeoutCount: 3,
+	}
+	server := New(cfg, config.DeviceConfig{}, hub)
+	server.SetTestMode()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	go func() { _ = server.Start(ctx) }()
+	time.Sleep(100 * time.Millisecond)
+	sipPort := server.sipConn.LocalAddr().(*net.UDPAddr).Port
+
+	mediaSock, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatalf("bind media socket: %v", err)
+	}
+	defer mediaSock.Close()
+	mediaPort := mediaSock.LocalAddr().(*net.UDPAddr).Port
+
+	sdp := fmt.Sprintf("v=0\no=- 0 0 IN IP4 127.0.0.1\ns=Play\nc=IN IP4 127.0.0.1\nt=0 0\nm=video %d RTP/AVP 96\na=rtpmap:96 PS/90000\na=recvonly\ny=0100000001", mediaPort)
+	invite := buildInvite("test-call-live@example.com",
+		"<sip:34020000012000000001@3402000000>;tag=live001",
+		"<sip:34020000001320000001@3402000000>",
+		"<sip:34020000012000000001@127.0.0.1:5060>")
+	invite.Body = sdp
+	clientConn, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: sipPort})
+	if err != nil {
+		t.Fatalf("dial server: %v", err)
+	}
+	defer clientConn.Close()
+
+	if _, err := clientConn.Write(invite.Serialize()); err != nil {
+		t.Fatalf("send INVITE: %v", err)
+	}
+	respBuf := make([]byte, 4096)
+	clientConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := clientConn.ReadFromUDP(respBuf); err != nil {
+		t.Fatalf("read 200 OK: %v", err)
+	}
+
+	// Wait for subscribe, then push AUs so live RTP flows.
+	time.Sleep(200 * time.Millisecond)
+	if count := hub.SubscriberCount(); count != 1 {
+		t.Fatalf("expected 1 subscriber after INVITE, got %d", count)
+	}
+	for i := 0; i < 3; i++ {
+		hub.Write(h264.AccessUnit{
+			NALUs:     []h264.NALU{{Type: 5, Data: []byte{0x65, 0x11, 0x22, 0x33}, IsIDR: true}},
+			Timestamp: time.Now(),
+			KeyFrame:  true,
+		})
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Receive a couple RTP packets to confirm live flow.
+	mediaSock.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 2048)
+	for i := 0; i < 2; i++ {
+		if _, _, err := mediaSock.ReadFromUDP(buf); err != nil {
+			t.Fatalf("read live RTP frame %d: %v", i, err)
+		}
+	}
+
+	// Send PAUSE INFO on the live session — server must 200 OK and keep streaming.
+	sendInfo(t, clientConn, buildInfo("test-call-live@example.com",
+		"<sip:34020000012000000001@3402000000>;tag=live001",
+		"<sip:34020000001320000001@3402000000>",
+		"<sip:34020000012000000001@127.0.0.1:5060>",
+		playbackControlBody("PAUSE", "", "", "", "")))
+
+	// Live RTP continues: push more AUs and assert they arrive.
+	for i := 0; i < 3; i++ {
+		hub.Write(h264.AccessUnit{
+			NALUs:     []h264.NALU{{Type: 5, Data: []byte{0x65, 0x11, 0x22, 0x33}, IsIDR: true}},
+			Timestamp: time.Now(),
+			KeyFrame:  true,
+		})
+		time.Sleep(50 * time.Millisecond)
+	}
+	mediaSock.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for i := 0; i < 2; i++ {
+		if _, _, err := mediaSock.ReadFromUDP(buf); err != nil {
+			t.Fatalf("live RTP stopped after PAUSE INFO (frame %d): %v", i, err)
+		}
+	}
+}
+
+// TestServer_InfoNonPlaybackControlGets200 verifies an INFO with a
+// non-PlaybackControl body is acknowledged with 200 OK.
+func TestServer_InfoNonPlaybackControlGets200(t *testing.T) {
+	_, sipPort, cancel := startPlaybackServer(t, nil)
+	defer cancel()
+
+	clientConn, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: sipPort})
+	if err != nil {
+		t.Fatalf("dial server: %v", err)
+	}
+	defer clientConn.Close()
+
+	sendInfo(t, clientConn, buildInfo("test-call-info@example.com",
+		"<sip:34020000012000000001@3402000000>;tag=info001",
+		"<sip:34020000001320000001@3402000000>",
+		"<sip:34020000012000000001@127.0.0.1:5060>",
+		`<Control><CmdType>DeviceControl</CmdType><SN>1</SN><DeviceID>d</DeviceID><Info><ControlValue>PAUSE</ControlValue></Info></Control>`))
+}

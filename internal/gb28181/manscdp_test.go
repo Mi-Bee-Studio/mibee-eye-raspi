@@ -2,6 +2,7 @@ package gb28181
 
 import (
 	"encoding/xml"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -959,5 +960,98 @@ func TestDispatch_RecordInfo_MissingTimeFields(t *testing.T) {
 	}
 	if resp.SumNum == nil || *resp.SumNum != 0 {
 		t.Errorf("Expected SumNum 0, got %v", resp.SumNum)
+	}
+}
+
+// TestParsePlaybackControl_Pause verifies a PAUSE control parses with
+// Value=="PAUSE" and nil times/speed.
+func TestParsePlaybackControl_Pause(t *testing.T) {
+	pc, ok := parsePlaybackControl(`<Control><CmdType>PlaybackControl</CmdType><SN>1</SN><DeviceID>d</DeviceID><Info><ControlValue>PAUSE</ControlValue></Info></Control>`)
+	if !ok {
+		t.Fatal("expected ok=true for PAUSE")
+	}
+	if pc.Value != "PAUSE" {
+		t.Errorf("Value = %q, want PAUSE", pc.Value)
+	}
+	if pc.StartTime != nil || pc.EndTime != nil || pc.Speed != nil {
+		t.Errorf("expected nil times/speed, got StartTime=%v EndTime=%v Speed=%v", pc.StartTime, pc.EndTime, pc.Speed)
+	}
+}
+
+// TestParsePlaybackControl_PlayWithTimes verifies a PLAY control with
+// StartTime+EndTime parses both as unix milliseconds.
+func TestParsePlaybackControl_PlayWithTimes(t *testing.T) {
+	start := time.Date(2026, 8, 15, 10, 0, 0, 0, time.Local).UnixMilli()
+	end := time.Date(2026, 8, 15, 10, 1, 0, 0, time.Local).UnixMilli()
+	body := fmt.Sprintf(`<Control><CmdType>PlaybackControl</CmdType><SN>1</SN><DeviceID>d</DeviceID><Info><ControlValue>PLAY</ControlValue><StartTime>%s</StartTime><EndTime>%s</EndTime></Info></Control>`, formatGBTime(start), formatGBTime(end))
+	pc, ok := parsePlaybackControl(body)
+	if !ok {
+		t.Fatal("expected ok=true for PLAY")
+	}
+	if pc.Value != "PLAY" {
+		t.Errorf("Value = %q, want PLAY", pc.Value)
+	}
+	if pc.StartTime == nil || *pc.StartTime != start {
+		t.Errorf("StartTime = %v, want %d", pc.StartTime, start)
+	}
+	if pc.EndTime == nil || *pc.EndTime != end {
+		t.Errorf("EndTime = %v, want %d", pc.EndTime, end)
+	}
+}
+
+// TestParsePlaybackControl_PlayWithSpeed verifies a PLAY control with
+// Speed parses the speed as a float pointer.
+func TestParsePlaybackControl_PlayWithSpeed(t *testing.T) {
+	pc, ok := parsePlaybackControl(`<Control><CmdType>PlaybackControl</CmdType><SN>1</SN><DeviceID>d</DeviceID><Info><ControlValue>PLAY</ControlValue><Speed>4</Speed></Info></Control>`)
+	if !ok {
+		t.Fatal("expected ok=true for PLAY with Speed")
+	}
+	if pc.Speed == nil || *pc.Speed != 4.0 {
+		t.Errorf("Speed = %v, want 4.0", pc.Speed)
+	}
+}
+
+// TestParsePlaybackControl_ScaleFallback verifies Speed falls back to
+// Scale when Speed is absent.
+func TestParsePlaybackControl_ScaleFallback(t *testing.T) {
+	pc, ok := parsePlaybackControl(`<Control><CmdType>PlaybackControl</CmdType><SN>1</SN><DeviceID>d</DeviceID><Info><ControlValue>PLAY</ControlValue><Scale>2.5</Scale></Info></Control>`)
+	if !ok {
+		t.Fatal("expected ok=true for PLAY with Scale")
+	}
+	if pc.Speed == nil || *pc.Speed != 2.5 {
+		t.Errorf("Speed = %v, want 2.5 (from Scale)", pc.Speed)
+	}
+}
+
+// TestParsePlaybackControl_RejectsNonControl verifies bodies that are not
+// PlaybackControl commands (wrong CmdType, garbage) yield ok==false.
+func TestParsePlaybackControl_RejectsNonControl(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"wrong CmdType", `<Control><CmdType>DeviceControl</CmdType><SN>1</SN><DeviceID>d</DeviceID><Info><ControlValue>PAUSE</ControlValue></Info></Control>`},
+		{"garbage", `not xml at all`},
+		{"empty", ``},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, ok := parsePlaybackControl(tc.body); ok {
+				t.Errorf("parsePlaybackControl(%q) ok = true, want false", tc.body)
+			}
+		})
+	}
+}
+
+// TestParsePlaybackControl_MissingInfoTolerated verifies a PlaybackControl
+// body without an <Info> element is tolerated (lenient parser): ok==true
+// with an empty Value that downstream treats as an unknown control.
+func TestParsePlaybackControl_MissingInfoTolerated(t *testing.T) {
+	pc, ok := parsePlaybackControl(`<Control><CmdType>PlaybackControl</CmdType><SN>1</SN><DeviceID>d</DeviceID></Control>`)
+	if !ok {
+		t.Fatal("expected ok=true for PlaybackControl with missing Info (lenient)")
+	}
+	if pc.Value != "" || pc.StartTime != nil || pc.EndTime != nil || pc.Speed != nil {
+		t.Errorf("expected empty control, got Value=%q StartTime=%v EndTime=%v Speed=%v", pc.Value, pc.StartTime, pc.EndTime, pc.Speed)
 	}
 }
