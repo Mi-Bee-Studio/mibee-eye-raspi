@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -154,6 +155,62 @@ func parseNotifyDual(body string) (Notify, bool) {
 		}, true
 	}
 	return Notify{}, false
+}
+
+// PlaybackControl is a parsed SIP INFO PlaybackControl command body.
+// It carries the control value (PAUSE/PLAY) plus optional seek and speed
+// fields. StartTime/EndTime are unix milliseconds; Speed is a pacing
+// multiplier (nil = unchanged).
+type PlaybackControl struct {
+	Value     string
+	StartTime *int64
+	EndTime   *int64
+	Speed     *float64
+}
+
+// ControlElem mirrors the child-element Control body format used by
+// GB/T 28181 PlaybackControl INFO messages.
+type ControlElem struct {
+	XMLName  xml.Name `xml:"Control"`
+	CmdType  string   `xml:"CmdType"`
+	SN       string   `xml:"SN"`
+	DeviceID string   `xml:"DeviceID"`
+	Info     struct {
+		ControlValue string `xml:"ControlValue"`
+		StartTime    string `xml:"StartTime"`
+		EndTime      string `xml:"EndTime"`
+		Speed        string `xml:"Speed"`
+		Scale        string `xml:"Scale"`
+	} `xml:"Info"`
+}
+
+// parsePlaybackControl parses a PlaybackControl INFO body. It is lenient:
+// missing or malformed fields are tolerated (nil pointers), and the speed
+// may come from either <Speed> or <Scale>. Returns ok=false when the body
+// is not a PlaybackControl command.
+func parsePlaybackControl(body string) (PlaybackControl, bool) {
+	var ctl ControlElem
+	if err := xml.Unmarshal([]byte(body), &ctl); err != nil || ctl.CmdType != "PlaybackControl" {
+		return PlaybackControl{}, false
+	}
+	pc := PlaybackControl{Value: ctl.Info.ControlValue}
+	if st, ok := parseGBTime(ctl.Info.StartTime); ok {
+		pc.StartTime = &st
+	}
+	if et, ok := parseGBTime(ctl.Info.EndTime); ok {
+		pc.EndTime = &et
+	}
+	// Speed may be <Speed> or <Scale>; take whichever parses.
+	for _, raw := range []string{ctl.Info.Speed, ctl.Info.Scale} {
+		if raw == "" {
+			continue
+		}
+		if v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64); err == nil && v > 0 {
+			pc.Speed = &v
+			break
+		}
+	}
+	return pc, true
 }
 
 // DeviceContext provides device identity and network context for MANSCDP responses.

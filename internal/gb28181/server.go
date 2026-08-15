@@ -64,6 +64,9 @@ type Server struct {
 	devCtx DeviceContext
 	// recordingIndex supplies recorded segments for RecordInfo queries (nil = none)
 	recordingIndex RecordingIndex
+	// playbackCtl routes SIP INFO PlaybackControl commands to the active
+	// playback goroutine (nil when no playback session is active). Guarded by mu.
+	playbackCtl chan<- PlaybackControl
 }
 
 // New creates a new GB28181 server.
@@ -216,7 +219,9 @@ func (s *Server) Start(ctx context.Context) error {
 				s.handleMessage(ctx, msg, addr)
 			case "ACK":
 				// No action needed - media is now flowing
-			case "SUBSCRIBE", "NOTIFY", "INFO", "OPTIONS":
+			case "INFO":
+				s.handleInfo(ctx, msg, addr)
+			case "SUBSCRIBE", "NOTIFY", "OPTIONS":
 				slog.Info("gb28181: received method, responding 200 OK", "method", msg.Method, "from", addr.String())
 				ok200 := Build200OK(msg, "", "")
 				if _, err := s.sipConn.WriteToUDP(ok200.Serialize(), addr); err != nil {
@@ -665,6 +670,7 @@ func (s *Server) handleInvite(ctx context.Context, msg SipMessage, fromAddr net.
 		s.mediaTCPConn.Close()
 		s.mediaTCPConn = nil
 	}
+	s.playbackCtl = nil
 	s.mu.Unlock()
 
 	// Bind local media UDP on ephemeral port
@@ -715,14 +721,16 @@ func (s *Server) handleInvite(ctx context.Context, msg SipMessage, fromAddr net.
 	if sessionType != "Play" {
 		// Playback/Download: stream recorded segments instead of live AUs.
 		mediaCtx, mediaCancel := context.WithCancel(ctx)
+		ctlCh := make(chan PlaybackControl, 4)
 		s.mu.Lock()
 		s.mediaCancel = mediaCancel
 		s.remoteRTPAddr = rtpDest
+		s.playbackCtl = ctlCh
 		s.mu.Unlock()
 		slog.Info("gb28181: playback media goroutine started", "session", sessionType, "remote", rtpDest.String(), "transport", s.cfg.Transport, "segments", len(playbackSegs))
 		go func() {
 			defer mediaCancel()
-			s.runPlayback(mediaCtx, mediaConn, mediaTCPConn, rtpDest, ssrc, playbackSegs, playbackRoot, startMs, endMs, sessionType)
+			s.runPlayback(mediaCtx, mediaConn, mediaTCPConn, rtpDest, ssrc, playbackSegs, playbackRoot, startMs, endMs, sessionType, ctlCh)
 		}()
 		return
 	}
@@ -798,6 +806,7 @@ func (s *Server) handleBye(ctx context.Context, msg SipMessage, fromAddr net.Add
 		s.mediaCancel = nil
 	}
 	s.remoteRTPAddr = nil
+	s.playbackCtl = nil
 	s.mu.Unlock()
 
 	// Send 200 OK to BYE
@@ -836,4 +845,36 @@ func (s *Server) handleMessage(ctx context.Context, msg SipMessage, fromAddr net
 			slog.Warn("gb28181: failed to send queued MESSAGE response", "error", err)
 		}
 	}
+}
+
+// handleInfo handles SIP INFO requests. PlaybackControl bodies are routed
+// to the active playback goroutine via the control channel; everything else
+// (including controls for live sessions, per binding #8) is acknowledged
+// with 200 OK and ignored.
+func (s *Server) handleInfo(ctx context.Context, msg SipMessage, fromAddr net.Addr) {
+	ctl, ok := parsePlaybackControl(msg.Body)
+	if !ok {
+		slog.Debug("gb28181: INFO without PlaybackControl body", "from", fromAddr.String())
+		ok200 := Build200OK(msg, "", "")
+		s.sendSIP(ok200.Serialize(), fromAddr)
+		return
+	}
+	s.mu.Lock()
+	ctlCh := s.playbackCtl
+	s.mu.Unlock()
+	if ctlCh == nil {
+		// No active playback session (live session or none): controls are
+		// no-ops per binding #8 — acknowledge and ignore.
+		slog.Info("gb28181: PlaybackControl ignored (no active playback session)", "value", ctl.Value, "from", fromAddr.String())
+		ok200 := Build200OK(msg, "", "")
+		s.sendSIP(ok200.Serialize(), fromAddr)
+		return
+	}
+	select {
+	case ctlCh <- ctl:
+	default:
+		slog.Warn("gb28181: PlaybackControl dropped (control channel full)", "value", ctl.Value)
+	}
+	ok200 := Build200OK(msg, "", "")
+	s.sendSIP(ok200.Serialize(), fromAddr)
 }
