@@ -5,7 +5,9 @@ package gb28181
 
 import (
 	"encoding/xml"
+	"fmt"
 	"log/slog"
+	"time"
 )
 
 // Query represents a MANSCDP Query request.
@@ -13,6 +15,14 @@ type Query struct {
 	XMLName  xml.Name `xml:"Query"`
 	CmdType  string   `xml:"CmdType,attr"`
 	SN       string   `xml:"SN,attr"`
+	DeviceID string   `xml:"DeviceID"`
+}
+
+// QueryElem represents a MANSCDP Query request with child-element format (for NVR compatibility).
+type QueryElem struct {
+	XMLName  xml.Name `xml:"Query"`
+	CmdType  string   `xml:"CmdType"`
+	SN       string   `xml:"SN"`
 	DeviceID string   `xml:"DeviceID"`
 }
 
@@ -71,6 +81,87 @@ type Notify struct {
 	SN       string   `xml:"SN,attr"`
 	DeviceID string   `xml:"DeviceID"`
 	Status   string   `xml:"Status,omitempty"`
+}
+
+// NotifyElem represents a MANSCDP Notify message with child-element format (for NVR compatibility).
+type NotifyElem struct {
+	XMLName  xml.Name `xml:"Notify"`
+	CmdType  string   `xml:"CmdType"`
+	SN       string   `xml:"SN"`
+	DeviceID string   `xml:"DeviceID"`
+	Status   string   `xml:"Status,omitempty"`
+}
+
+// parseQueryDual tries to parse a Query body in both attribute and child-element format.
+// Returns the normalized Query struct and a bool indicating success.
+func parseQueryDual(body string) (Query, bool) {
+	// Try attribute format first (existing struct)
+	var query Query
+	if err := xml.Unmarshal([]byte(body), &query); err == nil && query.CmdType != "" {
+		return query, true
+	}
+	// Try child-element format
+	var queryElem QueryElem
+	if err := xml.Unmarshal([]byte(body), &queryElem); err == nil && queryElem.CmdType != "" {
+		// Normalize to Query struct
+		return Query{
+			CmdType:  queryElem.CmdType,
+			SN:       queryElem.SN,
+			DeviceID: queryElem.DeviceID,
+		}, true
+	}
+	return Query{}, false
+}
+
+// parseNotifyDual tries to parse a Notify body in both attribute and child-element format.
+// Returns the normalized Notify struct and a bool indicating success.
+func parseNotifyDual(body string) (Notify, bool) {
+	// Try attribute format first (existing struct)
+	var notify Notify
+	if err := xml.Unmarshal([]byte(body), &notify); err == nil && notify.CmdType != "" {
+		return notify, true
+	}
+	// Try child-element format
+	var notifyElem NotifyElem
+	if err := xml.Unmarshal([]byte(body), &notifyElem); err == nil && notifyElem.CmdType != "" {
+		// Normalize to Notify struct
+		return Notify{
+			CmdType:  notifyElem.CmdType,
+			SN:       notifyElem.SN,
+			DeviceID: notifyElem.DeviceID,
+			Status:   notifyElem.Status,
+		}, true
+	}
+	return Notify{}, false
+}
+
+// DeviceContext provides device identity and network context for MANSCDP responses.
+type DeviceContext struct {
+	DeviceID     string
+	ChannelID    string
+	Name         string
+	Manufacturer string
+	Model        string
+	Firmware     string
+	LocalIP      string
+	LocalPort    int
+}
+
+// buildChannel creates a ChannelItem from DeviceContext.
+func buildChannel(dev DeviceContext) ChannelItem {
+	return ChannelItem{
+		DeviceID:     dev.ChannelID,
+		Name:         dev.ChannelID,
+		Status:       "ON",
+		Manufacturer: dev.Manufacturer,
+		Model:        dev.Model,
+		Owner:        dev.DeviceID,
+		ParentID:     dev.DeviceID,
+		Secrecy:      0,
+		RegisterWay:  1, // platform register
+		IPAddress:    dev.LocalIP,
+		Port:         dev.LocalPort,
+	}
 }
 
 // BuildCatalogResponseMessage creates a SIP MESSAGE with Catalog response.
@@ -147,29 +238,113 @@ func BuildKeepaliveMessage(sn, deviceID, status string) SipMessage {
 	}
 }
 
+// BuildRecordInfoResponseMessage creates a SIP MESSAGE with RecordInfo response (empty, no recordings).
+func BuildRecordInfoResponseMessage(sn, deviceID string) SipMessage {
+	type RecordInfoResponse struct {
+		XMLName    xml.Name `xml:"Response"`
+		CmdType    string   `xml:"CmdType,attr"`
+		SN         string   `xml:"SN,attr"`
+		DeviceID   string   `xml:"DeviceID"`
+		Name       string   `xml:"Name"`
+		SumNum     *int     `xml:"SumNum"`
+		RecordList struct {
+			Num int `xml:"Num,attr"`
+		} `xml:"RecordList"`
+	}
+	sumNum := 0
+	resp := RecordInfoResponse{
+		CmdType:  "RecordInfo",
+		SN:       sn,
+		DeviceID: deviceID,
+		Name:     "RecordInfo",
+		SumNum:   &sumNum,
+		RecordList: struct {
+			Num int `xml:"Num,attr"`
+		}{Num: 0},
+	}
+	xmlData, err := xml.Marshal(resp)
+	if err != nil {
+		slog.Error("Failed to marshal RecordInfo response", "error", err)
+		return SipMessage{}
+	}
+	return SipMessage{
+		Method:      "MESSAGE",
+		ContentType: "Application/MANSCDP+xml",
+		Body:        string(xmlData),
+		UserAgent:   "MiBee-GB28181/1.0",
+		Headers:     make(map[string]string),
+	}
+}
+
+// BuildDeviceStatusResponseMessage creates a SIP MESSAGE with DeviceStatus response.
+func BuildDeviceStatusResponseMessage(sn, deviceID string) SipMessage {
+	body := fmt.Sprintf(`<Response CmdType="DeviceStatus" SN="%s"><DeviceID>%s</DeviceID><Result>OK</Result><Online>ONLINE</Online><Status>OK</Status><Encode>ON</Encode><Record>OFF</Record><DeviceTime>%s</DeviceTime></Response>`, sn, deviceID, time.Now().Format("2006-01-02T15:04:05"))
+	return SipMessage{
+		Method:      "MESSAGE",
+		ContentType: "Application/MANSCDP+xml",
+		Body:        body,
+		UserAgent:   "MiBee-GB28181/1.0",
+		Headers:     make(map[string]string),
+	}
+}
+
+// BuildControlRejectResponseMessage creates a SIP MESSAGE with control rejection response.
+func BuildControlRejectResponseMessage(cmdType, sn, deviceID string) SipMessage {
+	body := fmt.Sprintf(`<Response CmdType="%s" SN="%s"><DeviceID>%s</DeviceID><Result>ERROR</Result></Response>`, cmdType, sn, deviceID)
+	return SipMessage{
+		Method:      "MESSAGE",
+		ContentType: "Application/MANSCDP+xml",
+		Body:        body,
+		UserAgent:   "MiBee-GB28181/1.0",
+		Headers:     make(map[string]string),
+	}
+}
+
 // DispatchInboundMessage parses inbound MANSCDP XML and returns appropriate responses.
 // Returns (ok200, queued_response_or_nil, error).
-func DispatchInboundMessage(msg SipMessage) (SipMessage, *SipMessage, error) {
+func DispatchInboundMessage(msg SipMessage, dev DeviceContext) (SipMessage, *SipMessage, error) {
 	if msg.Body == "" {
 		// No body to parse — just acknowledge
 		return SipMessage{}, nil, nil
 	}
 
-	// Try to parse as Query (Catalog, DeviceInfo)
-	var query Query
-	if err := xml.Unmarshal([]byte(msg.Body), &query); err == nil {
+	// Try to parse as Query (Catalog, DeviceInfo, RecordInfo, DeviceStatus, Control commands)
+	if query, ok := parseQueryDual(msg.Body); ok {
 		switch query.CmdType {
 		case "Catalog":
-			// Return 200 OK + queue Catalog response
+			// Return 200 OK + queue Catalog response with real channel data
 			ok200 := Build200OK(msg, "", "")
-			catalogResp := BuildCatalogResponseMessage(query.SN, query.DeviceID, []ChannelItem{})
+			channel := buildChannel(dev)
+			catalogResp := BuildCatalogResponseMessage(query.SN, query.DeviceID, []ChannelItem{channel})
 			return ok200, &catalogResp, nil
 		case "DeviceInfo":
-			// Return 200 OK + queue DeviceInfo response
+			// Return 200 OK + queue DeviceInfo response from dev context
 			ok200 := Build200OK(msg, "", "")
-			deviceInfo := DeviceItem{DeviceID: query.DeviceID, Name: "MiBee Eye", Manufacturer: "MiBee", Model: "Eye-RPi", Firmware: "1.0"}
+			deviceInfo := DeviceItem{
+				DeviceID:     dev.DeviceID,
+				Name:         dev.Name,
+				Manufacturer: dev.Manufacturer,
+				Model:        dev.Model,
+				Firmware:     dev.Firmware,
+			}
 			deviceInfoResp := BuildDeviceInfoResponseMessage(query.SN, query.DeviceID, deviceInfo)
 			return ok200, &deviceInfoResp, nil
+		case "RecordInfo":
+			// Return 200 OK + queue empty RecordInfo response
+			ok200 := Build200OK(msg, "", "")
+			recordInfoResp := BuildRecordInfoResponseMessage(query.SN, query.DeviceID)
+			return ok200, &recordInfoResp, nil
+		case "DeviceStatus":
+			// Return 200 OK + queue DeviceStatus response
+			ok200 := Build200OK(msg, "", "")
+			deviceStatusResp := BuildDeviceStatusResponseMessage(query.SN, query.DeviceID)
+			return ok200, &deviceStatusResp, nil
+		case "DeviceControl", "Broadcast", "DeviceConfig", "HomePosition":
+			// Return 200 OK + queue ControlReject response (control not supported)
+			slog.Warn("Control command not supported", "cmdtype", query.CmdType)
+			ok200 := Build200OK(msg, "", "")
+			controlReject := BuildControlRejectResponseMessage(query.CmdType, query.SN, query.DeviceID)
+			return ok200, &controlReject, nil
 		default:
 			slog.Warn("Unknown Query CmdType", "cmdtype", query.CmdType)
 			ok200 := Build200OK(msg, "", "")
@@ -178,8 +353,7 @@ func DispatchInboundMessage(msg SipMessage) (SipMessage, *SipMessage, error) {
 	}
 
 	// Try to parse as Notify (Keepalive ack from platform)
-	var notify Notify
-	if err := xml.Unmarshal([]byte(msg.Body), &notify); err == nil {
+	if notify, ok := parseNotifyDual(msg.Body); ok {
 		switch notify.CmdType {
 		case "Keepalive":
 			// Keepalive ack from platform — just 200 OK, no queued response

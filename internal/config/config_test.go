@@ -88,7 +88,6 @@ logging: {}
 		t.Errorf("ONVIF.Password = %q, want empty", cfg.ONVIF.Password)
 	}
 
-
 	// Device defaults
 	if cfg.Device.Name != "Pi Camera V1" {
 		t.Errorf("Device.Name = %q, want %q", cfg.Device.Name, "Pi Camera V1")
@@ -205,7 +204,6 @@ logging:
 	if cfg.ONVIF.Password != "onvifpass" {
 		t.Errorf("ONVIF.Password = %q", cfg.ONVIF.Password)
 	}
-
 
 	// Device
 	if cfg.Device.Name != "Test Camera" {
@@ -537,5 +535,52 @@ gb28181:
 	}
 	if cfg.GB28181.HeartbeatTimeoutCount != 5 {
 		t.Errorf("GB28181.HeartbeatTimeoutCount = %d, want 5 (env override)", cfg.GB28181.HeartbeatTimeoutCount)
+	}
+
+}
+
+func TestGB28181Transport_Default(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.GB28181.Transport != "udp" {
+		t.Errorf("GB28181.Transport = %q, want %q", cfg.GB28181.Transport, "udp")
+	}
+}
+
+func TestGB28181Transport_EnvOverride(t *testing.T) {
+	t.Setenv("MIBEE_EYE_GB28181_TRANSPORT", "tcp")
+
+	// YAML value differs from env value to prove env wins
+	cfgYAML := `
+gb28181:
+  transport: "udp"
+`
+	path := writeTempYAML(t, cfgYAML)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	if cfg.GB28181.Transport != "tcp" {
+		t.Errorf("GB28181.Transport = %q, want tcp (env override)", cfg.GB28181.Transport)
+	}
+}
+
+func TestGB28181Transport_InvalidRejected(t *testing.T) {
+	t.Setenv("MIBEE_EYE_GB28181_TRANSPORT", "sctp")
+
+	cfgYAML := `
+camera: {}
+rtsp: {}
+onvif: {}
+device: {}
+logging: {}
+`
+	path := writeTempYAML(t, cfgYAML)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for invalid transport, got nil")
+	}
+	if !strings.Contains(err.Error(), "transport") {
+		t.Errorf("error should mention 'transport', got: %v", err)
 	}
 }

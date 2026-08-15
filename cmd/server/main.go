@@ -351,7 +351,7 @@ func main() {
 	// --- Step 6.5: GB/T 28181 device ---
 	var gbServer *gb28181.Server
 	if cfg.GB28181.Enabled {
-		gbServer = gb28181.New(cfg.GB28181, auHub)
+		gbServer = gb28181.New(cfg.GB28181, cfg.Device, auHub)
 		go func() {
 			if err := gbServer.Start(ctx); err != nil {
 				slog.Error("gb28181 server", "error", err)
