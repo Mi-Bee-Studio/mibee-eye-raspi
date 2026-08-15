@@ -382,6 +382,10 @@ func main() {
 	var gbServer *gb28181.Server
 	if cfg.GB28181.Enabled {
 		gbServer = gb28181.New(cfg.GB28181, cfg.Device, auHub)
+		// Wire the recording index for RecordInfo queries (nil when recording disabled).
+		if recWriter != nil {
+			gbServer.SetRecordingIndex(recWriter.Index())
+		}
 		go func() {
 			if err := gbServer.Start(ctx); err != nil {
 				slog.Error("gb28181 server", "error", err)

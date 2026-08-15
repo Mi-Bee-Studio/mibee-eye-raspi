@@ -7,7 +7,11 @@ import (
 	"encoding/xml"
 	"fmt"
 	"log/slog"
+	"path/filepath"
+	"strings"
 	"time"
+
+	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/recording"
 )
 
 // RecordActive reports whether the device is currently recording.
@@ -17,18 +21,26 @@ var RecordActive func() bool
 
 // Query represents a MANSCDP Query request.
 type Query struct {
-	XMLName  xml.Name `xml:"Query"`
-	CmdType  string   `xml:"CmdType,attr"`
-	SN       string   `xml:"SN,attr"`
-	DeviceID string   `xml:"DeviceID"`
+	XMLName    xml.Name `xml:"Query"`
+	CmdType    string   `xml:"CmdType,attr"`
+	SN         string   `xml:"SN,attr"`
+	DeviceID   string   `xml:"DeviceID"`
+	StartTime  string   `xml:"StartTime"`
+	EndTime    string   `xml:"EndTime"`
+	Type       string   `xml:"Type"`
+	StreamType string   `xml:"StreamType"`
 }
 
 // QueryElem represents a MANSCDP Query request with child-element format (for NVR compatibility).
 type QueryElem struct {
-	XMLName  xml.Name `xml:"Query"`
-	CmdType  string   `xml:"CmdType"`
-	SN       string   `xml:"SN"`
-	DeviceID string   `xml:"DeviceID"`
+	XMLName    xml.Name `xml:"Query"`
+	CmdType    string   `xml:"CmdType"`
+	SN         string   `xml:"SN"`
+	DeviceID   string   `xml:"DeviceID"`
+	StartTime  string   `xml:"StartTime"`
+	EndTime    string   `xml:"EndTime"`
+	Type       string   `xml:"Type"`
+	StreamType string   `xml:"StreamType"`
 }
 
 // Response represents a MANSCDP Response message.
@@ -110,9 +122,13 @@ func parseQueryDual(body string) (Query, bool) {
 	if err := xml.Unmarshal([]byte(body), &queryElem); err == nil && queryElem.CmdType != "" {
 		// Normalize to Query struct
 		return Query{
-			CmdType:  queryElem.CmdType,
-			SN:       queryElem.SN,
-			DeviceID: queryElem.DeviceID,
+			CmdType:    queryElem.CmdType,
+			SN:         queryElem.SN,
+			DeviceID:   queryElem.DeviceID,
+			StartTime:  queryElem.StartTime,
+			EndTime:    queryElem.EndTime,
+			Type:       queryElem.Type,
+			StreamType: queryElem.StreamType,
 		}, true
 	}
 	return Query{}, false
@@ -243,20 +259,36 @@ func BuildKeepaliveMessage(sn, deviceID, status string) SipMessage {
 	}
 }
 
-// BuildRecordInfoResponseMessage creates a SIP MESSAGE with RecordInfo response (empty, no recordings).
-func BuildRecordInfoResponseMessage(sn, deviceID string) SipMessage {
-	type RecordInfoResponse struct {
-		XMLName    xml.Name `xml:"Response"`
-		CmdType    string   `xml:"CmdType,attr"`
-		SN         string   `xml:"SN,attr"`
-		DeviceID   string   `xml:"DeviceID"`
-		Name       string   `xml:"Name"`
-		SumNum     *int     `xml:"SumNum"`
-		RecordList struct {
-			Num int `xml:"Num,attr"`
-		} `xml:"RecordList"`
-	}
-	sumNum := 0
+// RecordItem represents one recorded segment in a RecordInfo response.
+type RecordItem struct {
+	DeviceID  string `xml:"DeviceID"`
+	Name      string `xml:"Name"`
+	FilePath  string `xml:"FilePath"`
+	Address   string `xml:"Address"`
+	StartTime string `xml:"StartTime"`
+	EndTime   string `xml:"EndTime"`
+	Secrecy   string `xml:"Secrecy"`
+	Type      string `xml:"Type"`
+}
+
+// RecordInfoResponse is the MANSCDP RecordInfo response body.
+type RecordInfoResponse struct {
+	XMLName    xml.Name `xml:"Response"`
+	CmdType    string   `xml:"CmdType,attr"`
+	SN         string   `xml:"SN,attr"`
+	DeviceID   string   `xml:"DeviceID"`
+	Name       string   `xml:"Name"`
+	SumNum     *int     `xml:"SumNum"`
+	RecordList struct {
+		Num  int          `xml:"Num,attr"`
+		Item []RecordItem `xml:"Item"`
+	} `xml:"RecordList"`
+}
+
+// BuildRecordInfoResponseMessage creates a SIP MESSAGE with a RecordInfo response.
+// With no items it emits the byte-stable empty response (SumNum=0, RecordList Num=0).
+func BuildRecordInfoResponseMessage(sn, deviceID string, items []RecordItem) SipMessage {
+	sumNum := len(items)
 	resp := RecordInfoResponse{
 		CmdType:  "RecordInfo",
 		SN:       sn,
@@ -264,8 +296,12 @@ func BuildRecordInfoResponseMessage(sn, deviceID string) SipMessage {
 		Name:     "RecordInfo",
 		SumNum:   &sumNum,
 		RecordList: struct {
-			Num int `xml:"Num,attr"`
-		}{Num: 0},
+			Num  int          `xml:"Num,attr"`
+			Item []RecordItem `xml:"Item"`
+		}{
+			Num:  len(items),
+			Item: items,
+		},
 	}
 	xmlData, err := xml.Marshal(resp)
 	if err != nil {
@@ -279,6 +315,27 @@ func BuildRecordInfoResponseMessage(sn, deviceID string) SipMessage {
 		UserAgent:   "MiBee-GB28181/1.0",
 		Headers:     make(map[string]string),
 	}
+}
+
+// parseGBTime parses a GB/T 28181 timestamp (2006-01-02T15:04:05) into unix
+// milliseconds in the device's local timezone, matching how recordings are
+// timestamped (formatGBTime round-trips). It is lenient about a trailing
+// 'Z' or timezone offset, and returns ok=false for empty or unparseable input.
+func parseGBTime(s string) (int64, bool) {
+	s = strings.TrimSpace(s)
+	if len(s) < 19 {
+		return 0, false
+	}
+	t, err := time.ParseInLocation("2006-01-02T15:04:05", s[:19], time.Local)
+	if err != nil {
+		return 0, false
+	}
+	return t.UnixMilli(), true
+}
+
+// formatGBTime formats unix milliseconds as a GB/T 28181 timestamp.
+func formatGBTime(ms int64) string {
+	return time.UnixMilli(ms).Format("2006-01-02T15:04:05")
 }
 
 // BuildDeviceStatusResponseMessage creates a SIP MESSAGE with DeviceStatus response.
@@ -309,9 +366,18 @@ func BuildControlRejectResponseMessage(cmdType, sn, deviceID string) SipMessage 
 	}
 }
 
+// RecordingIndex provides range lookup over recorded segments for RecordInfo
+// queries. It is satisfied by the recording subsystem's index via an adapter
+// wired in main.go, keeping gb28181 decoupled from the concrete index type.
+type RecordingIndex interface {
+	Lookup(startMs, endMs int64) []recording.SegmentInfo
+}
+
 // DispatchInboundMessage parses inbound MANSCDP XML and returns appropriate responses.
+// idx supplies recorded segments for RecordInfo queries; when nil, RecordInfo
+// returns the empty response.
 // Returns (ok200, queued_response_or_nil, error).
-func DispatchInboundMessage(msg SipMessage, dev DeviceContext) (SipMessage, *SipMessage, error) {
+func DispatchInboundMessage(msg SipMessage, dev DeviceContext, idx RecordingIndex) (SipMessage, *SipMessage, error) {
 	if msg.Body == "" {
 		// No body to parse — just acknowledge
 		return SipMessage{}, nil, nil
@@ -339,9 +405,28 @@ func DispatchInboundMessage(msg SipMessage, dev DeviceContext) (SipMessage, *Sip
 			deviceInfoResp := BuildDeviceInfoResponseMessage(query.SN, query.DeviceID, deviceInfo)
 			return ok200, &deviceInfoResp, nil
 		case "RecordInfo":
-			// Return 200 OK + queue empty RecordInfo response
+			// Return 200 OK + queue RecordInfo response from the recording index.
 			ok200 := Build200OK(msg, "", "")
-			recordInfoResp := BuildRecordInfoResponseMessage(query.SN, query.DeviceID)
+			var items []RecordItem
+			if idx != nil {
+				startMs, hasStart := parseGBTime(query.StartTime)
+				endMs, hasEnd := parseGBTime(query.EndTime)
+				if hasStart && hasEnd && startMs <= endMs {
+					for _, seg := range idx.Lookup(startMs, endMs) {
+						items = append(items, RecordItem{
+							DeviceID:  query.DeviceID,
+							Name:      filepath.Base(seg.File),
+							FilePath:  seg.File,
+							Address:   query.DeviceID,
+							StartTime: formatGBTime(seg.StartMS),
+							EndTime:   formatGBTime(seg.EndMS),
+							Secrecy:   "0",
+							Type:      "time",
+						})
+					}
+				}
+			}
+			recordInfoResp := BuildRecordInfoResponseMessage(query.SN, query.DeviceID, items)
 			return ok200, &recordInfoResp, nil
 		case "DeviceStatus":
 			// Return 200 OK + queue DeviceStatus response

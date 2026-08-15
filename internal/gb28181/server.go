@@ -61,6 +61,8 @@ type Server struct {
 	testMode bool
 	// devContext holds device identity for MANSCDP responses
 	devCtx DeviceContext
+	// recordingIndex supplies recorded segments for RecordInfo queries (nil = none)
+	recordingIndex RecordingIndex
 }
 
 // New creates a new GB28181 server.
@@ -77,6 +79,11 @@ func New(cfg config.GB28181Config, deviceCfg config.DeviceConfig, hub *h264.AUHu
 // SetTestMode enables test mode which skips REGISTER lifecycle.
 func (s *Server) SetTestMode() {
 	s.testMode = true
+}
+
+// SetRecordingIndex injects the recording index used for RecordInfo queries.
+func (s *Server) SetRecordingIndex(idx RecordingIndex) {
+	s.recordingIndex = idx
 }
 
 // Start starts the GB28181 server SIP listener and lifecycle.
@@ -732,7 +739,7 @@ func (s *Server) handleBye(ctx context.Context, msg SipMessage, fromAddr net.Add
 
 // handleMessage handles MESSAGE requests - dispatch MANSCDP XML, send 200 OK, and any queued response.
 func (s *Server) handleMessage(ctx context.Context, msg SipMessage, fromAddr net.Addr) {
-	ok200, queuedResp, err := DispatchInboundMessage(msg, s.devCtx)
+	ok200, queuedResp, err := DispatchInboundMessage(msg, s.devCtx, s.recordingIndex)
 	if err != nil {
 		slog.Warn("gb28181: failed to dispatch MESSAGE", "error", err)
 		return
