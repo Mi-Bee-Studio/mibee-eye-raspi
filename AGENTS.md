@@ -6,13 +6,14 @@ Go 1.26+ ONVIF camera service for single-board computers. Primary purpose: **tes
 
 | Item | Value |
 |------|-------|
-| Host | `ssh mickey@192.168.63.162` (sudo NOPASSWD) |
+| Host | `ssh mickey@192.168.63.118` (rpi3b-cam, sudo NOPASSWD). Previous host `.162` is offline. |
 | Board | RPi 3B, aarch64, 4 cores @1.2GHz, 905MB RAM (~565MB available) |
-| Camera | CSI module via libcamera (currently IMX219, OV5647 also supported) |
+| Camera | IMX219 CSI module via system `rpicam-vid` (camera mode `rpicamvid`) |
 | Network | WiFi only — **drops under sustained transfer**, 270Mbps theoretical |
-| Binaries | `/home/mickey/mibee-eye/mibee-eye` + `/home/mickey/mibee-eye/deploy/bin/mtxrpicam` |
-| Config | `/home/mickey/mibee-eye/config.yaml` (device-local, NOT in repo) |
-| Service | `systemctl {status,start,stop,restart} mibee-eye` |
+| Binary | `/home/mickey/rpi3b-cam/rpi3b-cam-arm64` (device-local, NOT in repo) |
+| Config | `/home/mickey/rpi3b-cam/configs/config.yaml` (device-local, NOT in repo; `-config` default is relative to WorkingDirectory) |
+| Recordings | `/home/mickey/rpi3b-cam/recordings/` |
+| Service | `systemctl {status,start,stop,restart} mibee-eye` — unit from `deploy/mibee-eye-118.service` (installed as `mibee-eye.service`, enabled, Restart=always) |
 
 ## Build & Deploy
 
@@ -26,13 +27,13 @@ go test ./...
 **Deploy gotchas** (learned the hard way):
 
 1. `make deploy` is **broken** — tries to `scp configs/config.yaml` which doesn't exist (only `config.example.yaml` in repo). Deploy binary manually instead.
-2. **WiFi drops under load** — stop the service before uploading, then restart:
+2. **WiFi drops under load** — upload the new binary as `.new`, then stop/swap/start:
    ```bash
-   ssh mickey@192.168.63.162 'sudo systemctl stop mibee-eye'
-   gzip -c build/mibee-eye | ssh mickey@192.168.63.162 'gunzip > ~/mibee-eye/mibee-eye && chmod +x ~/mibee-eye/mibee-eye'
-   ssh mickey@192.168.63.162 'sudo systemctl start mibee-eye'
+   GOOS=linux GOARCH=arm64 go build -o build/rpi3b-cam-arm64 ./cmd/server
+   gzip -c build/rpi3b-cam-arm64 | ssh mickey@192.168.63.118 'gunzip > ~/rpi3b-cam/rpi3b-cam-arm64.new && chmod +x ~/rpi3b-cam/rpi3b-cam-arm64.new'
+   ssh mickey@192.168.63.118 'sudo systemctl stop mibee-eye && mv ~/rpi3b-cam/rpi3b-cam-arm64{.new,} && sudo systemctl start mibee-eye'
    ```
-3. `mtxrpicam` binary must exist at `~/mibee-eye/deploy/bin/mtxrpicam` — systemd sets `LD_LIBRARY_PATH=/home/mickey/mibee-eye/deploy/bin`. Without it, camera capture fails silently.
+3. Camera mode on .118 is `rpicamvid` (system `rpicam-vid` + system libcamera) — no `mtxrpicam` binary or `LD_LIBRARY_PATH` needed. The legacy `mtxrpicam` mode notes below still apply to hosts that use it.
 4. Camera is **exclusive** — only one process can hold `/dev/video0`. The systemd unit has `Conflicts=mediamtx.service` to prevent conflicts.
 5. **Port 9100 conflict**: metrics defaults to :9100 but Prometheus node_exporter is already there. Set `metrics.enabled: false` or change port.
 

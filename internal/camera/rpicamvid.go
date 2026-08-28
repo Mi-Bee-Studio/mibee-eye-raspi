@@ -227,7 +227,7 @@ func (c *RPiCamVidCamera) spawnSubprocess() error {
 	if err != nil {
 		return fmt.Errorf("create stdout pipe: %w", err)
 	}
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = newTelemetryFilter(os.Stderr)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	env := []string{

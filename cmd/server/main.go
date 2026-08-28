@@ -15,17 +15,97 @@ import (
 
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/camera"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/config"
-	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/gb28181"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/h264"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/hls"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/metrics"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/netutil"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/onvif"
+	onvifgo "github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/onvif/onvifgo"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/recording"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/rtmp"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/rtsp"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/web"
+	gbdev "github.com/mickeyzzc/gb28181-go/device"
 )
+
+// ---------------------------------------------------------------------------
+// GB28181 device-library adapters
+// ---------------------------------------------------------------------------
+
+// auHubFrameSource adapts the host h264.AUHub to the gb28181-go device
+// package's FrameSource seam. Each subscription bridges the host channel,
+// converting access units; cancelling the subscription context tears the
+// bridge down with it.
+type auHubFrameSource struct{ hub *h264.AUHub }
+
+func (a auHubFrameSource) Subscribe(ctx context.Context) *gbdev.FrameSubscription {
+	sub := a.hub.Subscribe(ctx)
+	out := make(chan gbdev.AccessUnit, cap(sub.Channel))
+	go func() {
+		defer close(out)
+		for au := range sub.Channel {
+			nalus := make([]gbdev.NALU, len(au.NALUs))
+			for i, n := range au.NALUs {
+				nalus[i] = gbdev.NALU{Type: n.Type, Data: n.Data, IsIDR: n.IsIDR, IsSPS: n.IsSPS, IsPPS: n.IsPPS}
+			}
+			select {
+			case out <- gbdev.AccessUnit{NALUs: nalus, Timestamp: au.Timestamp, KeyFrame: au.KeyFrame}:
+			default: // slow consumer — drop, mirroring hub semantics
+			}
+		}
+	}()
+	return &gbdev.FrameSubscription{ID: sub.ID, Channel: out}
+}
+
+func (a auHubFrameSource) Unsubscribe(id string) { a.hub.Unsubscribe(id) }
+
+// recordingIndexAdapter adapts the host recording index to the device
+// package's PlaybackIndex seam (Lookup with SegmentMeta conversion + Root).
+type recordingIndexAdapter struct {
+	idx  *recording.Index
+	root string
+}
+
+func (r recordingIndexAdapter) Lookup(startMs, endMs int64) []gbdev.SegmentMeta {
+	segs := r.idx.Lookup(startMs, endMs)
+	out := make([]gbdev.SegmentMeta, len(segs))
+	for i, s := range segs {
+		out[i] = gbdev.SegmentMeta{File: s.File, StartMS: s.StartMS, EndMS: s.EndMS, Size: s.Size, Frames: s.Frames, Keyframes: s.Keyframes}
+	}
+	return out
+}
+
+func (r recordingIndexAdapter) Root() string { return r.root }
+
+// toDeviceConfig converts the host config structs (YAML-facing) to the
+// device package's Config/DeviceInfo (field-identical).
+func toDeviceConfig(c config.GB28181Config) gbdev.Config {
+	return gbdev.Config{
+		Enabled:               c.Enabled,
+		PlatformSIPAddress:    c.PlatformSIPAddress,
+		PlatformSIPPort:       c.PlatformSIPPort,
+		DeviceID:              c.DeviceID,
+		ChannelID:             c.ChannelID,
+		SIPDomain:             c.SIPDomain,
+		Password:              c.Password,
+		LocalSIPPort:          c.LocalSIPPort,
+		RegisterIntervalSecs:  c.RegisterIntervalSecs,
+		HeartbeatIntervalSecs: c.HeartbeatIntervalSecs,
+		HeartbeatTimeoutCount: c.HeartbeatTimeoutCount,
+		Transport:             c.Transport,
+	}
+}
+
+func toDeviceInfo(d config.DeviceConfig) gbdev.DeviceInfo {
+	return gbdev.DeviceInfo{
+		Name:         d.Name,
+		Manufacturer: d.Manufacturer,
+		Model:        d.Model,
+		Firmware:     d.Firmware,
+		HardwareID:   d.HardwareID,
+		SerialNumber: d.SerialNumber,
+	}
+}
 
 var (
 	version = "dev"
@@ -246,24 +326,10 @@ func main() {
 	// --- Step 4: ParamManager ---
 	paramManager := camera.NewParamManager(cam)
 
-	// --- Step 5: ONVIF Server ---
-	onvifServer := onvif.New(adapter)
-
-	// fallbackHost is used only when the per-request client IP can't be determined
-	// (e.g. test callers). Real ONVIF responses echo the NVR's source IP back as
-	// the XAddr/RTSP host so the URL is reachable from whichever interface was used.
-	deviceHost := fmt.Sprintf("%s:%d", localIP, cfg.ONVIF.Port)
-	onvif.RegisterDeviceHandlers(onvifServer, deviceHost, onvif.DeviceInfo{
-		Name:         cfg.Device.Name,
-		Manufacturer: cfg.Device.Manufacturer,
-		Model:        cfg.Device.Model,
-		Firmware:     cfg.Device.Firmware,
-		HardwareID:   cfg.Device.HardwareID,
-		SerialNumber: cfg.Device.SerialNumber,
-	})
-	onvif.RegisterMediaHandlers(onvifServer)
-	onvif.RegisterImagingHandlers(onvifServer, paramManager)
-	onvif.RegisterSnapshotHandlers(onvifServer, snapshotBuffer)
+	// --- Step 5: ONVIF Server (onvif-go/v2 transport) ---
+	// Advertises the device's own IP (localIP) in every URL: the NVR consumes
+	// XAddrs and stream URIs verbatim as this camera's endpoint.
+	onvifServer := onvifgo.New(cfg, localIP, paramManager, snapshotBuffer)
 
 	var webServer *web.Server
 	// --- Step 5.5: Web UI Server ---
@@ -347,12 +413,10 @@ func main() {
 		slog.Info("rtmp: push disabled")
 	}
 
-	// --- Step 6: WS-Discovery ---
-	discovery := onvif.NewDiscovery(cfg, localIP)
-	if err := discovery.StartUDP(ctx); err != nil {
+	// --- Step 6: WS-Discovery (onvif-go/v2 responder: UDP multicast + HTTP probe) ---
+	if err := onvifServer.StartDiscovery(ctx); err != nil {
 		slog.Warn("warning: failed to start WS-Discovery", "error", err)
 	}
-	onvifServer.SetDiscoveryHandler(http.HandlerFunc(discovery.HandleHTTPProbe))
 
 	// Start ONVIF HTTP server in goroutine
 	go func() {
@@ -365,7 +429,7 @@ func main() {
 	var recWriter *recording.Writer
 	if cfg.Recording.Enabled {
 		recWriter = recording.NewWriter(auHub, cfg.Recording)
-		gb28181.RecordActive = recWriter.Active
+		gbdev.RecordActive = recWriter.Active
 		go func() {
 			if err := recWriter.Run(ctx); err != nil {
 				slog.Error("recording: writer exited", "error", err)
@@ -379,12 +443,12 @@ func main() {
 	}
 
 	// --- Step 6.5: GB/T 28181 device ---
-	var gbServer *gb28181.Server
+	var gbServer *gbdev.Server
 	if cfg.GB28181.Enabled {
-		gbServer = gb28181.New(cfg.GB28181, cfg.Device, auHub)
+		gbServer = gbdev.New(toDeviceConfig(cfg.GB28181), toDeviceInfo(cfg.Device), auHubFrameSource{hub: auHub})
 		// Wire the recording index for RecordInfo queries (nil when recording disabled).
 		if recWriter != nil {
-			gbServer.SetRecordingIndex(recWriter.Index())
+			gbServer.SetRecordingIndex(recordingIndexAdapter{idx: recWriter.Index(), root: cfg.Recording.StoragePath})
 		}
 		go func() {
 			if err := gbServer.Start(ctx); err != nil {
@@ -439,7 +503,7 @@ func main() {
 	shutdownStep("hls", 5*time.Second, func() error { return nil })
 	<-ctx.Done()
 	slog.Info("MiBee Eye shutting down", "version", version)
-	shutdownStep("discovery", 5*time.Second, func() error { return discovery.StopUDP() })
+	shutdownStep("discovery", 5*time.Second, func() error { onvifServer.StopDiscovery(); return nil })
 	shutdownStep("onvif", 5*time.Second, func() error { return onvifServer.Stop() })
 
 	if gbServer != nil {

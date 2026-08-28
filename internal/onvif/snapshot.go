@@ -3,7 +3,6 @@ package onvif
 import (
 	"bytes"
 	"context"
-	"encoding/xml"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/config"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/h264"
 )
 
@@ -195,44 +193,4 @@ func (sb *SnapshotBuffer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Cache-Control", "no-store, must-revalidate")
 	w.Write(data)
-}
-
-// ---------------------------------------------------------------------------
-// SOAP handler — GetSnapshotUri
-// ---------------------------------------------------------------------------
-
-// GetSnapshotUriResponse is the ONVIF GetSnapshotUri SOAP response.
-type GetSnapshotUriResponse struct {
-	XMLName  xml.Name `xml:"trt:GetSnapshotUriResponse"`
-	MediaUri MediaUri `xml:"tt:MediaUri"`
-}
-
-// RegisterSnapshotHandlers registers the GetSnapshotUri SOAP action on the
-// ONVIF server, and optionally the /snapshot HTTP endpoint on the server.
-func RegisterSnapshotHandlers(s *Server, sb *SnapshotBuffer) {
-	if !sb.enabled {
-		return
-	}
-
-	s.RegisterAction("GetSnapshotUri", func(ctx context.Context, body []byte, auth *AuthResult) (interface{}, error) {
-		return handleGetSnapshotUri(ctx, s.config), nil
-	})
-
-	s.SetSnapshotHandler(sb)
-}
-
-// handleGetSnapshotUri returns the HTTP URL for snapshot capture.
-func handleGetSnapshotUri(ctx context.Context, cfg config.ConfigProvider) *GetSnapshotUriResponse {
-	ip := ServerIPFromContext(ctx, cfg.DeviceIP())
-	port := cfg.ONVIFPort()
-	uri := fmt.Sprintf("http://%s:%d/snapshot", ip, port)
-
-	return &GetSnapshotUriResponse{
-		MediaUri: MediaUri{
-			Uri:                 uri,
-			InvalidAfterConnect: "false",
-			InvalidAfterReboot:  "false",
-			Timeout:             "PT0S",
-		},
-	}
 }
