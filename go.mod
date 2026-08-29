@@ -7,7 +7,7 @@ require (
 	github.com/bluenviron/mediacommon/v2 v2.8.3
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
-	github.com/mickeyzzc/gb28181-go v0.1.1
+	github.com/mickeyzzc/gb28181-go v0.2.0
 	github.com/mickeyzzc/onvif-go/v2 v2.0.0-rc3
 	github.com/pion/rtp v1.10.2
 	golang.org/x/sys v0.44.0

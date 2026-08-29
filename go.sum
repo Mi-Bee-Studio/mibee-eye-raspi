@@ -8,6 +8,8 @@ github.com/gorilla/websocket v1.5.3 h1:saDtZ6Pbx/0u+bgYQ3q96pZgCzfhKXGPqt7kZ72aN
 github.com/gorilla/websocket v1.5.3/go.mod h1:YR8l580nyteQvAITg2hZ9XVh4b55+EU/adAjf1fMHhE=
 github.com/mickeyzzc/gb28181-go v0.1.1 h1:BGCkfaG76VK8bdZRk/zYQFegjriYxL7dB11zco7asYo=
 github.com/mickeyzzc/gb28181-go v0.1.1/go.mod h1:iBdMyROOcouMICmXo4lhHWGpopr7AX1B8RAFkoupx5A=
+github.com/mickeyzzc/gb28181-go v0.2.0 h1:S65UJORBfqzHATdsL2MTzd1fL1vGXfzZWQUTNZWl+Jw=
+github.com/mickeyzzc/gb28181-go v0.2.0/go.mod h1:iBdMyROOcouMICmXo4lhHWGpopr7AX1B8RAFkoupx5A=
 github.com/mickeyzzc/onvif-go/v2 v2.0.0-rc3 h1:XLCl5TdoSDs2clKm9BztPjUY+6pyjAx0j2rX9UuMpn4=
 github.com/mickeyzzc/onvif-go/v2 v2.0.0-rc3/go.mod h1:OmXWljqR4RIKMVVly/CxunWdyRCa4onMMGkt84SaQGQ=
 github.com/pion/logging v0.2.4 h1:tTew+7cmQ+Mc1pTBLKH2puKsOvhm32dROumOZ655zB8=
