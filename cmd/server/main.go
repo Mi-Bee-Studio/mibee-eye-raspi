@@ -445,6 +445,10 @@ func main() {
 	// --- Step 6.5: GB/T 28181 device ---
 	var gbServer *gbdev.Server
 	if cfg.GB28181.Enabled {
+		// gb28181-go v0.3.0 defaults the SIP User-Agent to a neutral value;
+		// stamp this product's identity explicitly before New (concurrent
+		// mutation afterwards would race the message builders).
+		gbdev.UserAgent = fmt.Sprintf("mibee-eye-raspi-go/%s", version)
 		gbServer = gbdev.New(toDeviceConfig(cfg.GB28181), toDeviceInfo(cfg.Device), auHubFrameSource{hub: auHub})
 		// Wire the recording index for RecordInfo queries (nil when recording disabled).
 		if recWriter != nil {

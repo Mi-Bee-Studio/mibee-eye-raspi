@@ -7,8 +7,8 @@ require (
 	github.com/bluenviron/mediacommon/v2 v2.8.3
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
-	github.com/mickeyzzc/gb28181-go v0.2.0
-	github.com/mickeyzzc/onvif-go/v2 v2.0.0-rc3
+	github.com/mickeyzzc/gb28181-go v0.3.0
+	github.com/mickeyzzc/onvif-go/v2 v2.0.0-rc4
 	github.com/pion/rtp v1.10.2
 	golang.org/x/sys v0.44.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -22,4 +22,5 @@ require (
 	github.com/pion/srtp/v3 v3.0.10 // indirect
 	github.com/pion/transport/v4 v4.0.1 // indirect
 	golang.org/x/net v0.54.0 // indirect
+	golang.org/x/text v0.41.0 // indirect
 )
