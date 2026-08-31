@@ -62,7 +62,7 @@ func buildInitSegment(sps, pps []byte, width, height uint32) []byte {
 	ftypBox := mp4Box("ftyp", ftyp)
 
 	// avcC
-	avcc := []byte{1} // configurationVersion
+	avcc := []byte{1}                           // configurationVersion
 	avcc = append(avcc, sps[1], sps[2], sps[3]) // profile/compat/level
 	avcc = append(avcc, 0xFF)                   // lengthSizeMinusOne=3 | reserved
 	avcc = append(avcc, 0xE1)                   // numSPS=1 | reserved
@@ -75,15 +75,15 @@ func buildInitSegment(sps, pps []byte, width, height uint32) []byte {
 
 	// avc1 sample entry
 	avc1 := make([]byte, 0, 78+len(avccBox))
-	avc1 = append(avc1, make([]byte, 6)...) // reserved
-	avc1 = u16be(avc1, 1)                   // data_reference_index
+	avc1 = append(avc1, make([]byte, 6)...)  // reserved
+	avc1 = u16be(avc1, 1)                    // data_reference_index
 	avc1 = append(avc1, make([]byte, 16)...) // pre_defined + reserved
 	avc1 = u16be(avc1, uint16(width))
 	avc1 = u16be(avc1, uint16(height))
-	avc1 = u32be(avc1, 0x00480000) // horizresolution 72dpi
-	avc1 = u32be(avc1, 0x00480000) // vertresolution
-	avc1 = u32be(avc1, 0)          // reserved
-	avc1 = u16be(avc1, 1)          // frame_count
+	avc1 = u32be(avc1, 0x00480000)           // horizresolution 72dpi
+	avc1 = u32be(avc1, 0x00480000)           // vertresolution
+	avc1 = u32be(avc1, 0)                    // reserved
+	avc1 = u16be(avc1, 1)                    // frame_count
 	avc1 = append(avc1, make([]byte, 32)...) // compressorname
 	avc1 = u16be(avc1, 0x0018)               // depth=24
 	avc1 = append(avc1, 0xFF, 0xFF)          // pre_defined

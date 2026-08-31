@@ -87,9 +87,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	oc := s.cfg.OnvifConfig
 	caps := map[string]interface{}{
-		"spec_version": "1",
-		"auth":         map[string]interface{}{"model": "session", "setup": true},
-		"multi_camera": false,
+		"spec_version":      "1",
+		"auth":              map[string]interface{}{"model": "session", "setup": true},
+		"multi_camera":      false,
 		"camera_management": false,
 		"camera_control":    false,
 		"imaging":           s.cfg.Params != nil,

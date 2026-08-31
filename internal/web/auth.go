@@ -366,7 +366,18 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if req.Username == "" || req.Password == "" {
+	// SPEC §2: empty/omitted username defaults to the configured admin
+	// account (single-admin login form; ONVIF fallback may set another name).
+	if req.Username == "" {
+		s.mu.RLock()
+		if s.username != "" {
+			req.Username = s.username
+		} else {
+			req.Username = "admin"
+		}
+		s.mu.RUnlock()
+	}
+	if req.Password == "" {
 		writeError(w, http.StatusBadRequest, "username and password are required")
 		return
 	}
