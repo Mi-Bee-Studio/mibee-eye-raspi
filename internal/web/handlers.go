@@ -1,5 +1,7 @@
 package web
 
+// Config and imaging endpoints (SPEC v1 §5, §4.5).
+
 import (
 	"encoding/json"
 	"fmt"
@@ -14,7 +16,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// handleGetConfig returns the full configuration dump.
+// handleGetConfig returns the full configuration dump (enveloped, secrets
+// masked to "****" per SPEC §5).
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	oc := s.cfg.OnvifConfig
 	if oc == nil {
@@ -23,12 +26,12 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cameraSection := map[string]interface{}{
-		"device":     oc.CameraDevice(),
-		"width":      oc.CameraWidth(),
-		"height":     oc.CameraHeight(),
-		"fps":        oc.CameraFPS(),
-		"codec":      oc.CameraCodec(),
-		"bitrate":    oc.CameraBitrate(),
+		"device":  oc.CameraDevice(),
+		"width":   oc.CameraWidth(),
+		"height":  oc.CameraHeight(),
+		"fps":     oc.CameraFPS(),
+		"codec":   oc.CameraCodec(),
+		"bitrate": oc.CameraBitrate(),
 	}
 
 	// Overlay live params from ParamManager when available.
@@ -45,6 +48,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	webUser, webPass := s.currentCredentials()
 	config := map[string]interface{}{
 		"camera": cameraSection,
 		"rtsp": map[string]interface{}{
@@ -58,12 +62,12 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 			"password": maskPassword(oc.ONVIFPassword()),
 		},
 		"device": map[string]interface{}{
-			"name":           oc.DeviceName(),
-			"manufacturer":   oc.DeviceManufacturer(),
-			"model":          oc.DeviceModel(),
-			"firmware":       oc.DeviceFirmware(),
-			"hardware_id":    oc.DeviceHardwareID(),
-			"serial_number":  oc.DeviceSerialNumber(),
+			"name":          oc.DeviceName(),
+			"manufacturer":  oc.DeviceManufacturer(),
+			"model":         oc.DeviceModel(),
+			"firmware":      oc.DeviceFirmware(),
+			"hardware_id":   oc.DeviceHardwareID(),
+			"serial_number": oc.DeviceSerialNumber(),
 		},
 		"logging": map[string]interface{}{
 			"level": oc.LoggingLevel(),
@@ -71,8 +75,8 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		"web": map[string]interface{}{
 			"enabled":  true,
 			"port":     s.cfg.Port,
-			"username": s.username,
-			"password": maskPassword(s.password),
+			"username": webUser,
+			"password": maskPassword(webPass),
 		},
 		"gb28181": func() map[string]interface{} {
 			if s.cfg.GB28181Config == nil {
@@ -94,243 +98,160 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		}(),
 	}
 
-	writeJSON(w, http.StatusOK, config)
+	writeOK(w, http.StatusOK, config)
 }
 
-// handlePostConfigOnvif updates ONVIF credentials and triggers restart.
-func (s *Server) handlePostConfigOnvif(w http.ResponseWriter, r *http.Request) {
+// handlePutConfig accepts a partial config document (SPEC §5), deep-merges it
+// over the YAML file, restores masked secrets, and restarts the process so
+// the change applies (config_apply default = restart). If the web section
+// changes the credentials, the in-memory ones update immediately too.
+func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.ConfigPath == "" {
 		writeError(w, http.StatusNotImplemented, "config path not configured")
 		return
 	}
 
-	var req struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	var update map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
 		return
 	}
 
-	if req.Username == "" || req.Password == "" {
-		writeError(w, http.StatusBadRequest, "username and password are required")
-		return
-	}
-
-	// Read existing config file to preserve all sections.
 	data, err := os.ReadFile(s.cfg.ConfigPath)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to read config: %v", err))
 		return
 	}
-
-	// Unmarshal into generic map to preserve all sections.
 	var cfg map[string]interface{}
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to parse config: %v", err))
 		return
 	}
 
-	// Update only the onvif section.
-	cfg["onvif"] = map[string]interface{}{
-		"port":     s.cfg.OnvifConfig.ONVIFPort(),
-		"username": req.Username,
-		"password": req.Password,
-	}
+	restoreMaskedSecrets(update, cfg)
+	deepMerge(cfg, update)
 
-	// Marshal the complete config back to YAML.
 	out, err := yaml.Marshal(cfg)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to marshal config: %v", err))
 		return
 	}
-
-	// Atomic write: temp file in same directory, then rename.
-	dir := filepath.Dir(s.cfg.ConfigPath)
-	tmpFile, err := os.CreateTemp(dir, filepath.Base(s.cfg.ConfigPath)+".*.tmp")
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create temp file: %v", err))
-		return
-	}
-	tmpPath := tmpFile.Name()
-
-	if _, err := tmpFile.Write(out); err != nil {
-		tmpFile.Close()
-		os.Remove(tmpPath)
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to write temp file: %v", err))
-		return
-	}
-	if err := tmpFile.Sync(); err != nil {
-		tmpFile.Close()
-		os.Remove(tmpPath)
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to sync temp file: %v", err))
-		return
-	}
-	if err := tmpFile.Close(); err != nil {
-		os.Remove(tmpPath)
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to close temp file: %v", err))
-		return
-	}
-	if err := os.Rename(tmpPath, s.cfg.ConfigPath); err != nil {
-		os.Remove(tmpPath)
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to rename config: %v", err))
+	if err := atomicWrite(s.cfg.ConfigPath, out); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	s.logger.Printf("web: ONVIF config updated, restarting in 500ms")
+	// Credentials take effect immediately so a fresh login works post-restart.
+	if webSec, ok := update["web"].(map[string]interface{}); ok {
+		if u, ok := webSec["username"].(string); ok && u != "" && u != "****" {
+			s.mu.Lock()
+			s.username = u
+			s.mu.Unlock()
+		}
+	}
 
-	// Schedule restart after response is sent.
+	s.logger.Printf("web: config updated, restarting in 500ms")
 	go func() {
 		<-time.After(500 * time.Millisecond)
 		_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
 	}()
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"ok":               true,
-		"restart_required": true,
-	})
+	writeOK(w, http.StatusOK, map[string]interface{}{"applied": "restart"})
 }
 
-// handlePostConfigGb28181 updates GB28181 settings and triggers restart.
-func (s *Server) handlePostConfigGb28181(w http.ResponseWriter, r *http.Request) {
-	if s.cfg.ConfigPath == "" {
-		writeError(w, http.StatusNotImplemented, "config path not configured")
-		return
+// restoreMaskedSecrets replaces "****" password values in the update with
+// the stored ones so a masked GET → PUT round-trip keeps secrets.
+func restoreMaskedSecrets(update, current map[string]interface{}) {
+	sections := []string{"onvif", "web", "gb28181", "rtsp"}
+	for _, sec := range sections {
+		upd, ok := update[sec].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		pw, ok := upd["password"].(string)
+		if !ok || pw != "****" {
+			continue
+		}
+		if cur, ok := current[sec].(map[string]interface{}); ok {
+			if stored, ok := cur["password"].(string); ok {
+				upd["password"] = stored
+			}
+		}
 	}
+}
 
-	var req struct {
-		Enabled               bool   `json:"enabled"`
-		PlatformSIPAddress    string `json:"platform_sip_address"`
-		PlatformSIPPort       int    `json:"platform_sip_port"`
-		DeviceID              string `json:"device_id"`
-		ChannelID             string `json:"channel_id"`
-		SIPDomain             string `json:"sip_domain"`
-		Password              string `json:"password"`
-		LocalSIPPort          int    `json:"local_sip_port"`
-		RegisterIntervalSecs  int    `json:"register_interval_secs"`
-		HeartbeatIntervalSecs int    `json:"heartbeat_interval_secs"`
-		HeartbeatTimeoutCount int    `json:"heartbeat_timeout_count"`
+// deepMerge recursively merges src into dst (maps only; other values replace).
+func deepMerge(dst, src map[string]interface{}) {
+	for k, v := range src {
+		if sub, ok := v.(map[string]interface{}); ok {
+			if dsub, ok := dst[k].(map[string]interface{}); ok {
+				deepMerge(dsub, sub)
+				continue
+			}
+		}
+		dst[k] = v
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
-		return
-	}
+}
 
-	if req.PlatformSIPAddress == "" || req.DeviceID == "" {
-		writeError(w, http.StatusBadRequest, "platform_sip_address and device_id are required")
-		return
-	}
-
-	// Read existing config file to preserve all sections.
-	data, err := os.ReadFile(s.cfg.ConfigPath)
+// atomicWrite writes data to path via a temp file + rename.
+func atomicWrite(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	tmpFile, err := os.CreateTemp(dir, filepath.Base(path)+".*.tmp")
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to read config: %v", err))
-		return
-	}
-
-	// Unmarshal into generic map to preserve all sections.
-	var cfg map[string]interface{}
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to parse config: %v", err))
-		return
-	}
-
-	// Update only the gb28181 section.
-	cfg["gb28181"] = map[string]interface{}{
-		"enabled":                 req.Enabled,
-		"platform_sip_address":    req.PlatformSIPAddress,
-		"platform_sip_port":       req.PlatformSIPPort,
-		"device_id":               req.DeviceID,
-		"channel_id":              req.ChannelID,
-		"sip_domain":              req.SIPDomain,
-		"password":                req.Password,
-		"local_sip_port":          req.LocalSIPPort,
-		"register_interval_secs":  req.RegisterIntervalSecs,
-		"heartbeat_interval_secs": req.HeartbeatIntervalSecs,
-		"heartbeat_timeout_count": req.HeartbeatTimeoutCount,
-	}
-
-	// Marshal the complete config back to YAML.
-	out, err := yaml.Marshal(cfg)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to marshal config: %v", err))
-		return
-	}
-
-	// Atomic write: temp file in same directory, then rename.
-	dir := filepath.Dir(s.cfg.ConfigPath)
-	tmpFile, err := os.CreateTemp(dir, filepath.Base(s.cfg.ConfigPath)+".*.tmp")
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create temp file: %v", err))
-		return
+		return fmt.Errorf("failed to create temp file: %w", err)
 	}
 	tmpPath := tmpFile.Name()
-
-	if _, err := tmpFile.Write(out); err != nil {
+	if _, err := tmpFile.Write(data); err != nil {
 		tmpFile.Close()
 		os.Remove(tmpPath)
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to write temp file: %v", err))
-		return
+		return fmt.Errorf("failed to write temp file: %w", err)
 	}
 	if err := tmpFile.Sync(); err != nil {
 		tmpFile.Close()
 		os.Remove(tmpPath)
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to sync temp file: %v", err))
-		return
+		return fmt.Errorf("failed to sync temp file: %w", err)
 	}
 	if err := tmpFile.Close(); err != nil {
 		os.Remove(tmpPath)
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to close temp file: %v", err))
-		return
+		return fmt.Errorf("failed to close temp file: %w", err)
 	}
-	if err := os.Rename(tmpPath, s.cfg.ConfigPath); err != nil {
+	if err := os.Rename(tmpPath, path); err != nil {
 		os.Remove(tmpPath)
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to rename config: %v", err))
-		return
+		return fmt.Errorf("failed to rename config: %w", err)
 	}
-
-	s.logger.Printf("web: GB28181 config updated, restarting in 500ms")
-
-	// Schedule restart after response is sent.
-	go func() {
-		<-time.After(500 * time.Millisecond)
-		_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
-	}()
-
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"ok":               true,
-		"restart_required": true,
-	})
+	return nil
 }
 
-// handleGetCameraParams returns all current camera parameters.
+// handleGetCameraParams returns all current imaging parameters (SPEC §4.5).
 func (s *Server) handleGetCameraParams(w http.ResponseWriter, r *http.Request) {
+	if !s.requireCamera0(w, r) {
+		return
+	}
 	if s.cfg.Params == nil {
 		writeError(w, http.StatusInternalServerError, "param manager not available")
 		return
 	}
 
 	result := map[string]interface{}{}
-
-	// Get all ranged params.
 	for name := range camera.ParamRanges {
 		if val, err := s.cfg.Params.Get(name); err == nil {
 			result[name] = val
 		}
 	}
-	// Get all enum params.
 	for name := range camera.ParamEnums {
 		if val, err := s.cfg.Params.Get(name); err == nil {
 			result[name] = val
 		}
 	}
-
-	writeJSON(w, http.StatusOK, result)
+	writeOK(w, http.StatusOK, result)
 }
 
-// handlePostCameraParam sets a single camera parameter.
+// handlePostCameraParam sets a single imaging parameter (immediate effect,
+// broadcasts param_changed via the SSE hub).
 func (s *Server) handlePostCameraParam(w http.ResponseWriter, r *http.Request) {
+	if !s.requireCamera0(w, r) {
+		return
+	}
 	if s.cfg.Params == nil {
 		writeError(w, http.StatusInternalServerError, "param manager not available")
 		return
@@ -344,46 +265,44 @@ func (s *Server) handlePostCameraParam(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
 		return
 	}
-
 	if req.Name == "" {
 		writeError(w, http.StatusBadRequest, "parameter name is required")
 		return
 	}
 
-	// Coerce JSON number (always float64) to int for integer params.
 	value := coerceFloat64(req.Value)
-
 	if err := s.cfg.Params.Set(req.Name, value); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-
 	s.logger.Printf("web: camera param %s set to %v", req.Name, value)
-
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"ok":   true,
-		"name": req.Name,
-		"value": value,
-	})
+	writeOK(w, http.StatusOK, map[string]interface{}{"name": req.Name, "value": value})
 }
 
-// handleGetCameraOptions returns parameter ranges and enum values.
+// handleGetCameraOptions returns imaging parameter ranges and enums.
 func (s *Server) handleGetCameraOptions(w http.ResponseWriter, r *http.Request) {
+	if !s.requireCamera0(w, r) {
+		return
+	}
 	result := map[string]interface{}{}
-
-	for name, r := range camera.ParamRanges {
+	for name, rg := range camera.ParamRanges {
 		result[name] = map[string]interface{}{
-			"min":     r.Min,
-			"max":     r.Max,
-			"default": r.Default,
+			"min":     rg.Min,
+			"max":     rg.Max,
+			"default": rg.Default,
 		}
 	}
 	for name, enums := range camera.ParamEnums {
-		result[name] = map[string]interface{}{
-			"enums": enums,
-		}
+		result[name] = map[string]interface{}{"enums": enums}
 	}
-
-	writeJSON(w, http.StatusOK, result)
+	writeOK(w, http.StatusOK, result)
 }
 
+// requireCamera0 answers 404 for any camera id other than "0".
+func (s *Server) requireCamera0(w http.ResponseWriter, r *http.Request) bool {
+	if r.PathValue("id") != "0" {
+		writeError(w, http.StatusNotFound, "no such camera")
+		return false
+	}
+	return true
+}

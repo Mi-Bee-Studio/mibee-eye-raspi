@@ -14,9 +14,22 @@ import (
 	"time"
 )
 
+// SPEC v1 §2 session auth: cookie session + CSRF double-submit.
+//
+// - `session` cookie: HttpOnly, SameSite=Strict, 24h (in-memory store — a
+//   process restart signs everyone out; accepted device dialect A3).
+// - `csrf-token` cookie: readable by JS; every state-changing /api request
+//   must echo it in the X-CSRF-Token header (login/setup/logout exempt).
+// - First boot (no password configured): /api/auth/me answers 503
+//   setup_required and POST /api/auth/setup creates the admin.
+
 const (
 	sessionTTL  = 24 * time.Hour
 	cleanupTick = 1 * time.Hour
+
+	sessionCookie = "session"
+	csrfCookie    = "csrf-token"
+	csrfHeader    = "X-CSRF-Token"
 )
 
 // loginRateLimiter tracks failed login attempts per IP.
@@ -40,90 +53,90 @@ const (
 // session represents an authenticated user session.
 type session struct {
 	username  string
+	csrf      string
 	createdAt time.Time
 	expiresAt time.Time
 }
 
-// SessionStore manages in-memory bearer-token sessions.
+// SessionStore manages in-memory cookie sessions.
 type SessionStore struct {
 	mu       sync.RWMutex
 	sessions map[string]session
-
-	username string
-	password string
 }
 
-// NewSessionStore creates a new session store with the given credentials.
-// Tokens are issued via Login and validated via Validate.
-// Returns an error if the password is empty.
-func NewSessionStore(username, password string) (*SessionStore, error) {
-	if password == "" {
-		return nil, errors.New("web: password must not be empty. Set web.password or MIBEE_EYE_WEB_PASSWORD")
-	}
-	s := &SessionStore{
-		sessions: make(map[string]session),
-		username: username,
-		password: password,
-	}
+// NewSessionStore creates an empty session store. Credentials live on the
+// Server (they may change via setup/reset); an empty password simply means
+// first-boot state.
+func NewSessionStore() *SessionStore {
+	s := &SessionStore{sessions: make(map[string]session)}
 	go s.cleanup()
-	return s, nil
+	return s
 }
 
-// Login validates credentials and returns a new bearer token on success.
-func (s *SessionStore) Login(user, pass string) (string, time.Time, error) {
-	userMatch := subtle.ConstantTimeCompare([]byte(user), []byte(s.username)) == 1
-	passMatch := subtle.ConstantTimeCompare([]byte(pass), []byte(s.password)) == 1
-	if !userMatch || !passMatch {
-		return "", time.Time{}, errors.New("invalid credentials")
+func newToken() (string, error) {
+	b := make([]byte, 24)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
 	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
 
-	tokenBytes := make([]byte, 32)
-	if _, err := rand.Read(tokenBytes); err != nil {
-		return "", time.Time{}, err
+// Create issues a session, returning (session token, csrf token).
+func (s *SessionStore) Create(username string) (string, string, error) {
+	token, err := newToken()
+	if err != nil {
+		return "", "", err
 	}
-	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
+	csrf, err := newToken()
+	if err != nil {
+		return "", "", err
+	}
 	now := time.Now()
-	expires := now.Add(sessionTTL)
-
 	s.mu.Lock()
 	s.sessions[token] = session{
-		username:  user,
+		username:  username,
+		csrf:      csrf,
 		createdAt: now,
-		expiresAt: expires,
+		expiresAt: now.Add(sessionTTL),
 	}
 	s.mu.Unlock()
-
-	return token, expires, nil
+	return token, csrf, nil
 }
 
-// Validate checks a bearer token and returns the associated username.
-// Returns an error if the token is missing, unknown, or expired.
-func (s *SessionStore) Validate(token string) (string, error) {
+// Validate checks a session token, returning (username, csrf) or an error.
+func (s *SessionStore) Validate(token string) (string, string, error) {
 	if token == "" {
-		return "", errors.New("missing token")
+		return "", "", errors.New("missing token")
 	}
 	s.mu.RLock()
 	sess, ok := s.sessions[token]
 	s.mu.RUnlock()
 	if !ok {
-		return "", errors.New("invalid token")
+		return "", "", errors.New("invalid token")
 	}
 	if time.Now().After(sess.expiresAt) {
 		s.mu.Lock()
 		delete(s.sessions, token)
 		s.mu.Unlock()
-		return "", errors.New("token expired")
+		return "", "", errors.New("token expired")
 	}
-	return sess.username, nil
+	return sess.username, sess.csrf, nil
 }
 
-// Logout invalidates a bearer token. No-op if token is empty/invalid.
+// Logout invalidates a session. No-op if the token is empty/invalid.
 func (s *SessionStore) Logout(token string) {
 	if token == "" {
 		return
 	}
 	s.mu.Lock()
 	delete(s.sessions, token)
+	s.mu.Unlock()
+}
+
+// Clear invalidates every session (password reset).
+func (s *SessionStore) Clear() {
+	s.mu.Lock()
+	s.sessions = make(map[string]session)
 	s.mu.Unlock()
 }
 
@@ -151,7 +164,6 @@ func (s *SessionStore) cleanup() {
 }
 
 // allow checks if the given IP is allowed to attempt login.
-// Returns false if the IP is currently blocked.
 func (l *loginRateLimiter) allow(ip string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -160,16 +172,13 @@ func (l *loginRateLimiter) allow(ip string) bool {
 		return true
 	}
 	now := time.Now()
-	// If blocked and block not expired yet, deny.
 	if now.Before(entry.blockedUntil) {
 		return false
 	}
-	// If block expired, clean up and allow.
 	if !entry.blockedUntil.IsZero() {
 		delete(l.attempts, ip)
 		return true
 	}
-	// If window expired, clean up and allow.
 	if now.Sub(entry.windowStart) > loginWindow {
 		delete(l.attempts, ip)
 		return true
@@ -178,24 +187,18 @@ func (l *loginRateLimiter) allow(ip string) bool {
 }
 
 // recordFailure increments the failed attempt counter for the given IP.
-// If the counter reaches maxLoginAttempts, the IP is blocked for loginBlockDuration.
 func (l *loginRateLimiter) recordFailure(ip string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := time.Now()
 	entry, ok := l.attempts[ip]
 	if !ok {
-		l.attempts[ip] = &rateLimitEntry{
-			count:       1,
-			windowStart: now,
-		}
+		l.attempts[ip] = &rateLimitEntry{count: 1, windowStart: now}
 		return
 	}
-	// If already blocked, don't increment further.
 	if now.Before(entry.blockedUntil) {
 		return
 	}
-	// If window expired, reset count.
 	if now.Sub(entry.windowStart) > loginWindow {
 		entry.count = 1
 		entry.windowStart = now
@@ -208,7 +211,7 @@ func (l *loginRateLimiter) recordFailure(ip string) {
 	}
 }
 
-// recordSuccess resets the rate limiter for the given IP after a successful login.
+// recordSuccess resets the rate limiter for the given IP.
 func (l *loginRateLimiter) recordSuccess(ip string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -224,48 +227,98 @@ func extractIP(r *http.Request) string {
 	return ip
 }
 
-// extractToken returns the bearer token from the Authorization header.
-// For WebSocket upgrade requests (which cannot set custom headers in browsers),
-// the token may also be passed via the ?token= query parameter.
-func extractToken(r *http.Request) string {
-	auth := r.Header.Get("Authorization")
-	if strings.HasPrefix(auth, "Bearer ") {
-		return strings.TrimPrefix(auth, "Bearer ")
+// sessionCookieValue reads the `session` cookie from the request.
+func sessionCookieValue(r *http.Request) string {
+	c, err := r.Cookie(sessionCookie)
+	if err != nil {
+		return ""
 	}
-
-	// Browser WebSocket API cannot set Authorization header.
-	// Allow token via query parameter ONLY for WebSocket upgrade requests.
-	if isWebSocketUpgrade(r) {
-		if token := r.URL.Query().Get("token"); token != "" {
-			return token
-		}
-	}
-	return ""
+	return c.Value
 }
 
-// isWebSocketUpgrade returns true if the request is a WebSocket upgrade request.
-func isWebSocketUpgrade(r *http.Request) bool {
-	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket") &&
-		strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade")
+// setSessionCookies issues the session + csrf cookies on the response.
+func setSessionCookies(w http.ResponseWriter, token, csrf string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookie,
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   int(sessionTTL.Seconds()),
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name:     csrfCookie,
+		Value:    csrf,
+		Path:     "/",
+		SameSite: http.SameSiteStrictMode,
+	})
 }
 
-// authRequired wraps a handler with bearer-token validation.
-// Returns 401 JSON on missing/invalid token.
+// isWrite reports whether the method changes state (CSRF applies).
+func isWriteMethod(method string) bool {
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch:
+		return true
+	}
+	return false
+}
+
+// csrfExempt paths carry no session yet (SPEC §2).
+func csrfExempt(path string) bool {
+	switch path {
+	case "/api/auth/login", "/api/auth/setup", "/api/auth/logout":
+		return true
+	}
+	return false
+}
+
+// authRequired wraps a handler with session-cookie validation plus the CSRF
+// double-submit check on writes.
 func (s *Server) authRequired(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		token := extractToken(r)
-		if _, err := s.sessions.Validate(token); err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			w.Write([]byte(`{"error":"unauthorized"}`))
+		token := sessionCookieValue(r)
+		_, csrf, err := s.sessions.Validate(token)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, "not signed in")
 			return
+		}
+		if isWriteMethod(r.Method) && !csrfExempt(r.URL.Path) {
+			if subtle.ConstantTimeCompare([]byte(r.Header.Get(csrfHeader)), []byte(csrf)) != 1 {
+				writeError(w, http.StatusUnauthorized, "csrf mismatch")
+				return
+			}
 		}
 		next(w, r)
 	}
 }
 
-// handleLogin authenticates the user and returns a bearer token.
-func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+// credentialsEqual compares a login attempt in constant time.
+func (s *Server) credentialsEqual(user, pass string) bool {
+	userMatch := subtle.ConstantTimeCompare([]byte(user), []byte(s.username)) == 1
+	passMatch := subtle.ConstantTimeCompare([]byte(pass), []byte(s.password)) == 1
+	return userMatch && passMatch
+}
+
+// handleMe answers the UI's auth-state probe (SPEC §2): 200 signed in,
+// 401 login, 503 setup_required.
+func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
+	if !s.configured() {
+		writeError(w, http.StatusServiceUnavailable, "setup_required")
+		return
+	}
+	if username, _, err := s.sessions.Validate(sessionCookieValue(r)); err == nil {
+		writeOK(w, http.StatusOK, map[string]interface{}{"username": username, "role": "admin"})
+		return
+	}
+	writeError(w, http.StatusUnauthorized, "not signed in")
+}
+
+// handleSetup creates the admin account on first boot (SPEC §2).
+func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
+	if s.configured() {
+		writeError(w, http.StatusBadRequest, "already configured")
+		return
+	}
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -274,27 +327,57 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-
-	// If no password is configured, reject all login attempts.
-	if s.password == "" {
-		writeError(w, http.StatusUnauthorized, "Password cannot be empty. Set onvif.password in config")
+	if req.Username == "" || len(req.Password) < 8 {
+		writeError(w, http.StatusBadRequest, "username required and password >= 8 chars")
 		return
 	}
 
+	s.mu.Lock()
+	s.username = req.Username
+	s.password = req.Password
+	s.mu.Unlock()
+
+	if err := s.persistWebCredentials(req.Username, req.Password); err != nil {
+		slog.Warn("web: setup could not persist credentials", "err", err)
+	}
+
+	token, csrf, err := s.sessions.Create(req.Username)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "session error")
+		return
+	}
+	setSessionCookies(w, token, csrf)
+	slog.Info("web: admin created", "user", req.Username)
+	writeOK(w, http.StatusOK, map[string]interface{}{"username": req.Username})
+}
+
+// handleLogin establishes a session (SPEC §2). Accepts any username while
+// the stored one is the ONVIF fallback (migration dialect).
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if !s.configured() {
+		writeError(w, http.StatusServiceUnavailable, "setup_required")
+		return
+	}
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
 	if req.Username == "" || req.Password == "" {
 		writeError(w, http.StatusBadRequest, "username and password are required")
 		return
 	}
 
-	// Check rate limiter before attempting authentication.
 	ip := extractIP(r)
 	if !s.loginLimiter.allow(ip) {
 		writeError(w, http.StatusTooManyRequests, "too many login attempts, try again later")
 		return
 	}
 
-	token, expires, err := s.sessions.Login(req.Username, req.Password)
-	if err != nil {
+	if !s.credentialsEqual(req.Username, req.Password) {
 		s.loginLimiter.recordFailure(ip)
 		slog.Warn("web: login failed", "user", req.Username)
 		writeError(w, http.StatusUnauthorized, "invalid username or password")
@@ -302,19 +385,77 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.loginLimiter.recordSuccess(ip)
-	slog.Info("web: login OK", "user", req.Username, "active_sessions", s.sessions.Count())
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"token":      token,
-		"username":   req.Username,
-		"expires_at": expires.UTC().Format(time.RFC3339),
-		"expires_in": int(sessionTTL.Seconds()),
-	})
-}
-func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	token := extractToken(r)
-	if username, err := s.sessions.Validate(token); err == nil {
-		s.sessions.Logout(token)
-		slog.Info("web: logout OK", "user", username, "active_sessions", s.sessions.Count())
+	token, csrf, err := s.sessions.Create(s.username)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "session error")
+		return
 	}
+	slog.Info("web: login OK", "user", s.username, "active_sessions", s.sessions.Count())
+	setSessionCookies(w, token, csrf)
+	writeOK(w, http.StatusOK, map[string]interface{}{"username": s.username})
+}
+
+// handleLogout drops the session and clears the cookie.
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if token := sessionCookieValue(r); token != "" {
+		if username, _, err := s.sessions.Validate(token); err == nil {
+			s.sessions.Logout(token)
+			slog.Info("web: logout OK", "user", username, "active_sessions", s.sessions.Count())
+		}
+	}
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", MaxAge: -1})
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// handleReset changes the admin password, invalidating every session.
+func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		OldPassword string `json:"old_password"`
+		NewPassword string `json:"new_password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if len(req.NewPassword) < 8 {
+		writeError(w, http.StatusBadRequest, "password >= 8 chars")
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(req.OldPassword), []byte(s.password)) != 1 {
+		writeError(w, http.StatusUnauthorized, "wrong password")
+		return
+	}
+
+	s.mu.Lock()
+	s.password = req.NewPassword
+	s.mu.Unlock()
+	if err := s.persistWebCredentials(s.username, req.NewPassword); err != nil {
+		slog.Warn("web: reset could not persist credentials", "err", err)
+	}
+	s.sessions.Clear()
+
+	token, csrf, err := s.sessions.Create(s.username)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "session error")
+		return
+	}
+	setSessionCookies(w, token, csrf)
+	writeOK(w, http.StatusOK, map[string]interface{}{"username": s.username})
+}
+
+// configured reports whether an admin credential exists (web section or the
+// ONVIF fallback).
+func (s *Server) configured() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.password != ""
+}
+
+// currentCredentials returns the resolved credentials.
+func (s *Server) currentCredentials() (string, string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.username, s.password
+}
+
+var _ = strings.TrimSpace // keep strings import if unused paths change
