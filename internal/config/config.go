@@ -30,6 +30,8 @@ type CameraConfig struct {
 	BinPath         string        `yaml:"bin_path"`          // Path to mtxrpicam binary
 	FrameBufferSize int           `yaml:"frame_buffer_size"` // Frame channel buffer capacity
 	MaxBackoff      time.Duration `yaml:"max_backoff"`       // Max subprocess restart backoff
+	HFlip           bool          `yaml:"hflip"`              // Device-level horizontal mirror (baked into the encoded stream)
+	VFlip           bool          `yaml:"vflip"`              // Device-level vertical flip (upside-down mount compensation)
 }
 
 // RTSPConfig holds RTSP server settings.
@@ -166,6 +168,8 @@ func DefaultConfig() *Config {
 			BinPath:         "deploy/bin/mtxrpicam",
 			FrameBufferSize: 30,
 			MaxBackoff:      30 * time.Second,
+			HFlip:           false,
+			VFlip:           false,
 		},
 		RTSP: RTSPConfig{
 			Port:                 8554,

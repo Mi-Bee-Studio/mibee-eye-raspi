@@ -32,6 +32,11 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		"fps":     oc.CameraFPS(),
 		"codec":   oc.CameraCodec(),
 		"bitrate": oc.CameraBitrate(),
+		// Persistent device-level flips (YAML camera.hflip/vflip). The live
+		// PascalCase HFlip/VFlip from ParamManager are also overlaid below
+		// for the imaging panel.
+		"hflip": oc.CameraHFlip(),
+		"vflip": oc.CameraVFlip(),
 	}
 
 	// Overlay live params from ParamManager when available.

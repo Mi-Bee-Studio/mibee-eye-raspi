@@ -65,6 +65,12 @@ logging: {}
 	if cfg.Camera.Sharpness != 1.0 {
 		t.Errorf("Camera.Sharpness = %f, want %f", cfg.Camera.Sharpness, 1.0)
 	}
+	if cfg.Camera.HFlip {
+		t.Error("Camera.HFlip default = true, want false")
+	}
+	if cfg.Camera.VFlip {
+		t.Error("Camera.VFlip default = true, want false")
+	}
 
 	// RTSP defaults
 	if cfg.RTSP.Port != 8554 {
@@ -127,6 +133,8 @@ camera:
   contrast: 2.0
   saturation: 1.5
   sharpness: 3.0
+  hflip: true
+  vflip: true
 rtsp:
   port: 8555
   username: "testuser"
@@ -169,6 +177,12 @@ logging:
 	}
 	if cfg.Camera.Bitrate != 1_000_000 {
 		t.Errorf("Camera.Bitrate = %d", cfg.Camera.Bitrate)
+	}
+	if !cfg.Camera.HFlip {
+		t.Error("Camera.HFlip = false, want true")
+	}
+	if !cfg.Camera.VFlip {
+		t.Error("Camera.VFlip = false, want true")
 	}
 	if cfg.Camera.Brightness != -0.5 {
 		t.Errorf("Camera.Brightness = %f", cfg.Camera.Brightness)

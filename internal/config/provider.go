@@ -19,6 +19,8 @@ type ConfigProvider interface {
 	CameraWidth() int
 	CameraHeight() int
 	CameraFPS() int
+	CameraHFlip() bool
+	CameraVFlip() bool
 	DeviceName() string
 	DeviceManufacturer() string
 	DeviceModel() string

@@ -146,6 +146,8 @@ func (a *configAdapter) CameraBitrate() int         { return a.cfg.Camera.Bitrat
 func (a *configAdapter) CameraWidth() int           { return a.cfg.Camera.Width }
 func (a *configAdapter) CameraHeight() int          { return a.cfg.Camera.Height }
 func (a *configAdapter) CameraFPS() int             { return a.cfg.Camera.FPS }
+func (a *configAdapter) CameraHFlip() bool           { return a.cfg.Camera.HFlip }
+func (a *configAdapter) CameraVFlip() bool           { return a.cfg.Camera.VFlip }
 func (a *configAdapter) DeviceName() string         { return a.cfg.Device.Name }
 func (a *configAdapter) DeviceManufacturer() string { return a.cfg.Device.Manufacturer }
 func (a *configAdapter) DeviceModel() string        { return a.cfg.Device.Model }
@@ -196,6 +198,11 @@ func main() {
 	cameraParams.Sharpness = float32(cfg.Camera.Sharpness)
 	cameraParams.IDRPeriod = uint32(cfg.Camera.IDRPeriod)
 	cameraParams.Codec = "hardwareH264"
+	// Device-level flips from config: baked into the encoded stream by the
+	// capture backend (libcamera transform), so every consumer (RTSP, ONVIF,
+	// GB28181, recordings, /snapshot) sees them, persistently.
+	cameraParams.HFlip = cfg.Camera.HFlip
+	cameraParams.VFlip = cfg.Camera.VFlip
 	cameraInfo := camera.CameraInfo{
 		Name:         cfg.Device.Name,
 		Manufacturer: cfg.Device.Manufacturer,
