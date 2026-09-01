@@ -1,386 +1,264 @@
-<!doctype html>
-<html lang="en" data-theme="dark" data-lang="en">
+<!DOCTYPE html>
+<html lang="zh">
 <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-    <meta name="color-scheme" content="dark light">
-    <meta name="description" content="MiBee Eye admin panel — manage ONVIF/RTSP camera settings">
-    <title>MiBee Eye</title>
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%233b82f6'/%3E%3Ccircle cx='16' cy='16' r='7' fill='none' stroke='white' stroke-width='2.5'/%3E%3Ccircle cx='16' cy='16' r='2.5' fill='white'/%3E%3C/svg%3E">
-    <link rel="stylesheet" href="/static/style.css">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#0a0e14">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'><circle cx='24' cy='24' r='20' fill='none' stroke='%2300c8a0' stroke-width='2'/><circle cx='24' cy='24' r='2' fill='%2300c8a0'/></svg>">
+  <title>MiBee Cam</title>
+  <link rel="stylesheet" href="/style.css">
 </head>
-<body data-auth="logged-out">
-
-    <!-- ========== Loading Overlay ========== -->
-    <div id="loading-overlay" class="loading-overlay" aria-hidden="true">
-        <div class="loading-spinner"></div>
-    </div>
-
-    <a class="skip-link" href="#main" data-i18n="a11y.skipToContent">Skip to content</a>
-
-    <!-- ========== Login Screen ========== -->
-    <div id="login-screen" class="login-screen" role="dialog" aria-modal="true" aria-labelledby="login-title">
-        <div class="login-card">
-            <div class="login-brand">
-                <div class="brand-mark" aria-hidden="true">
-                    <svg viewBox="0 0 32 32" width="36" height="36">
-                        <rect width="32" height="32" rx="8" fill="currentColor" opacity="0.15"/>
-                        <circle cx="16" cy="16" r="8" fill="none" stroke="currentColor" stroke-width="2.2"/>
-                        <circle cx="16" cy="16" r="2.5" fill="currentColor"/>
-                    </svg>
-                </div>
-                <h1 id="login-title" class="login-title">MiBee Eye</h1>
-                <p class="login-sub" data-i18n="login.subtitle">Sign in to manage your camera</p>
-            </div>
-
-            <form id="login-form" class="login-form" novalidate>
-                <div class="form-group">
-                    <label class="form-label" for="login-user" data-i18n="login.username">Username</label>
-                    <input class="form-input" type="text" id="login-user" name="username"
-                           autocomplete="username" autocapitalize="off" autocorrect="off"
-                           spellcheck="false" required>
-                </div>
-                <div class="form-group">
-                    <label class="form-label" for="login-pass" data-i18n="login.password">Password</label>
-                    <div class="login-pass-wrap">
-                        <input class="form-input" type="password" id="login-pass" name="password"
-                               autocomplete="current-password" required>
-                        <button type="button" class="login-pass-toggle" id="login-pass-toggle" aria-label="Show password">
-                            <svg class="eye-on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z"/><circle cx="12" cy="12" r="3"/>
-                            </svg>
-                            <svg class="eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19M14.12 14.12a3 3 0 1 1-4.24-4.24"/>
-                                <path d="M1 1l22 22"/>
-                            </svg>
-                        </button>
-                    </div>
-                </div>
-                <div id="login-error" class="form-error" hidden role="alert"></div>
-                <button type="submit" class="btn btn-primary btn-block" id="login-submit">
-                    <span class="btn-label" data-i18n="login.submit">Sign in</span>
-                    <span class="btn-spinner" aria-hidden="true"></span>
-                </button>
-            </form>
-
-            <div class="login-foot">
-                <span data-i18n="login.hint">Default credentials are the ONVIF username/password.</span>
-            </div>
+<body>
+  <!-- ===== Login / Setup View ===== -->
+  <div id="view-login" class="view active">
+    <div class="login-overlay">
+      <div class="login-box">
+        <div class="login-brand">
+          <svg class="brand-icon" viewBox="0 0 48 48" width="48" height="48">
+            <circle cx="24" cy="24" r="20" fill="none" stroke="currentColor" stroke-width="2"/>
+            <circle cx="24" cy="24" r="8" fill="none" stroke="currentColor" stroke-width="2"/>
+            <circle cx="24" cy="24" r="2" fill="currentColor"/>
+            <path d="M24 4v6M24 38v6M4 24h6M38 24h6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+          <h1>MiBee Cam</h1>
+          <p class="login-subtitle" data-i18n="loginSubtitle">Unified device management</p>
         </div>
-    </div>
-
-    <!-- ========== App (hidden until authenticated) ========== -->
-    <div class="app" data-auth-content hidden>
-        <!-- ========== Sidebar ========== -->
-        <aside class="sidebar" aria-label="Primary">
-            <div class="sidebar-brand">
-                <div class="brand-mark" aria-hidden="true">
-                    <svg viewBox="0 0 32 32" width="28" height="28">
-                        <rect width="32" height="32" rx="7" fill="currentColor" opacity="0.15"/>
-                        <circle cx="16" cy="16" r="8" fill="none" stroke="currentColor" stroke-width="2.2"/>
-                        <circle cx="16" cy="16" r="2.5" fill="currentColor"/>
-                    </svg>
-                </div>
-                <div class="brand-text">
-                    <span class="brand-name">MiBee Eye</span>
-                    <span class="brand-tag" data-i18n="brand.tagline">Camera Admin</span>
-                </div>
+        <!-- SPEC §2: session auth. The username and confirm fields only
+             appear in first-boot setup mode (503 setup_required). -->
+        <form id="login-form" autocomplete="on">
+          <div class="field hidden" id="auth-username-field">
+            <label for="login-username" data-i18n="newUsername">Admin username</label>
+            <input type="text" id="login-username" name="username" autocomplete="username">
+          </div>
+          <div class="field">
+            <label for="login-password" data-i18n="password">Password</label>
+            <div class="password-wrap">
+              <input type="password" id="login-password" name="password" autocomplete="current-password" autofocus required>
+              <button type="button" class="password-toggle" data-target="login-password" aria-label="Show password">&#128065;</button>
             </div>
-
-            <nav class="sidebar-nav" aria-label="Sections">
-                <button class="nav-item active" data-tab="server" type="button">
-                    <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                        <rect x="3" y="4" width="18" height="12" rx="2"/>
-                        <path d="M7 20h10M12 16v4"/>
-                    </svg>
-                    <span data-i18n="nav.server">Server</span>
-                </button>
-                <button class="nav-item" data-tab="camera" type="button">
-                    <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                        <path d="M3 8h3l2-2h8l2 2h3v11H3z"/>
-                        <circle cx="12" cy="13" r="4"/>
-                    </svg>
-                    <span data-i18n="nav.camera">Camera</span>
-                </button>
-            </nav>
-
-            <div class="sidebar-foot">
-                <div class="sidebar-version">
-					<span class="dot" aria-hidden="true"></span>
-					<span id="version-display">--</span>
-                </div>
+          </div>
+          <div class="field hidden" id="login-password2-field">
+            <label for="login-password2" data-i18n="passwordConfirm">Confirm password</label>
+            <div class="password-wrap">
+              <input type="password" id="login-password2" name="password2" autocomplete="new-password">
             </div>
-        </aside>
+          </div>
+          <div id="login-error" class="msg-error hidden" role="alert"></div>
+          <button type="submit" class="btn-primary btn-full" data-i18n="loginBtn">Sign In</button>
+        </form>
+      </div>
+    </div>
+  </div>
 
-        <!-- ========== Main Column ========== -->
-        <div class="main-col">
-            <header class="topbar" role="banner">
-                <div class="topbar-left">
-                    <button class="icon-btn sidebar-toggle" id="btn-sidebar-toggle" type="button" aria-label="Toggle sidebar">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
-                            <path d="M4 6h16M4 12h16M4 18h16"/>
-                        </svg>
-                    </button>
-                    <h1 class="page-title" id="page-title" data-i18n="nav.server">Server</h1>
-                </div>
-                <div class="topbar-right">
-                    <span id="ws-status" class="status-pill disconnected" role="status" aria-live="polite">
-                        <span class="status-dot" aria-hidden="true"></span>
-                        <span class="status-text" data-i18n="status.disconnected">Disconnected</span>
-                    </span>
+  <!-- ===== Main App Shell ===== -->
+  <div id="app" class="hidden">
+    <!-- Top Navigation -->
+    <nav id="nav">
+      <div class="nav-brand">
+        <svg viewBox="0 0 48 48" width="28" height="28">
+          <circle cx="24" cy="24" r="20" fill="none" stroke="currentColor" stroke-width="2"/>
+          <circle cx="24" cy="24" r="2" fill="currentColor"/>
+        </svg>
+        <span>MiBee Cam</span>
+      </div>
+      <div class="nav-tabs">
+        <button class="nav-tab active" data-view="preview" data-i18n="live">Live</button>
+        <button class="nav-tab hidden" data-view="cameras" data-i18n="cameras">Cameras</button>
+        <button class="nav-tab" data-view="settings" data-i18n="settings">Settings</button>
+        <button class="nav-tab" data-view="status" data-i18n="status">Status</button>
+        <button class="nav-tab hidden" data-view="devices" data-i18n="devices">Devices</button>
+      </div>
+      <div class="nav-tools">
+        <button class="tool-btn lang-btn" aria-pressed="false" title="Language">中/EN</button>
+        <button class="tool-btn theme-btn" aria-pressed="true" title="Theme">
+          <svg class="icon-sun hidden" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          <svg class="icon-moon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+        </button>
+        <button class="tool-btn logout-btn" data-i18n="logout">Logout</button>
+      </div>
+    </nav>
 
-                    <div class="control-group" role="group" aria-label="Theme">
-                        <button id="btn-theme" class="icon-btn" type="button" aria-label="Toggle theme" title="Toggle theme">
-                            <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                <circle cx="12" cy="12" r="4"/>
-                                <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>
-                            </svg>
-                            <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
-                            </svg>
-                        </button>
-                    </div>
+    <!-- Mobile Nav (bottom bar) -->
+    <nav id="nav-mobile">
+      <div class="nav-mobile-tabs">
+        <button class="nav-tab active" data-view="preview" data-i18n="live">Live</button>
+        <button class="nav-tab hidden" data-view="cameras" data-i18n="cameras">Cameras</button>
+        <button class="nav-tab" data-view="settings" data-i18n="settings">Settings</button>
+        <button class="nav-tab" data-view="status" data-i18n="status">Status</button>
+        <button class="nav-tab hidden" data-view="devices" data-i18n="devices">Devices</button>
+      </div>
+      <div class="nav-mobile-tools">
+        <button class="tool-btn lang-btn" aria-pressed="false">中/EN</button>
+        <button class="tool-btn theme-btn" aria-pressed="true">
+          <svg class="icon-sun hidden" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          <svg class="icon-moon" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+        </button>
+        <button class="tool-btn logout-btn" data-i18n="logout">Logout</button>
+      </div>
+    </nav>
 
-                    <div class="control-group" role="group" aria-label="Language">
-                        <button id="btn-lang" class="lang-btn" type="button" aria-label="Switch language" title="Switch language">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="lang-icon">
-                                <circle cx="12" cy="12" r="9"/>
-                                <path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>
-                            </svg>
-                            <span class="lang-current" data-i18n="lang.current">EN</span>
-                        </button>
-                    </div>
-
-                    <div class="control-group user-menu" role="group" aria-label="User">
-                        <button id="btn-user" class="user-btn" type="button" aria-label="User menu" aria-haspopup="true">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="user-icon">
-                                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
-                                <circle cx="12" cy="7" r="4"/>
-                            </svg>
-                            <span id="user-name" class="user-name">—</span>
-                        </button>
-                        <button id="btn-logout" class="icon-btn icon-btn-danger" type="button" aria-label="Sign out" title="Sign out">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
-                                <polyline points="16 17 21 12 16 7"/>
-                                <line x1="21" y1="12" x2="9" y2="12"/>
-                            </svg>
-                        </button>
-                    </div>
-                </div>
-            </header>
-
-            <main id="main" class="content" role="main">
-                <!-- ========== Server Tab ========== -->
-                <section id="tab-server" class="tab-panel active" aria-labelledby="page-title">
-                    <div class="page-head">
-                        <div>
-                            <h2 class="page-h" data-i18n="server.title">Server Configuration</h2>
-                            <p class="page-sub" data-i18n="server.subtitle">Live view of running service configuration.</p>
-                        </div>
-                        <div class="page-head-actions">
-                            <button class="btn btn-primary" id="btn-edit-onvif" type="button">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="btn-icon">
-                                    <path d="M12 20h9M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/>
-                                </svg>
-                                <span data-i18n="server.editOnvif">Edit ONVIF Credentials</span>
-                            </button>
-                            <button class="btn btn-primary" id="btn-edit-gb28181" type="button">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="btn-icon">
-                                    <path d="M12 20h9M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/>
-                                </svg>
-                                <span data-i18n="modal.editGb28181">Edit GB28181 Settings</span>
-                            </button>
-                        </div>
-                    </div>
-                    <div id="server-config" class="config-stack"></div>
-                </section>
-
-                <!-- ========== Camera Tab ========== -->
-                <section id="tab-camera" class="tab-panel" aria-labelledby="page-title" hidden>
-
-                    <!-- Live Preview -->
-                    <article class="card card-video">
-                        <header class="card-head">
-                            <div>
-                                <h2 class="card-title" data-i18n="camera.preview">Live Preview</h2>
-                                <p class="card-sub" data-i18n="camera.previewSub">Live video over WebSocket.</p>
-                            </div>
-                            <div class="card-head-actions">
-                                <span class="live-badge" id="live-badge" aria-live="polite">&mdash;</span>
-                            </div>
-                        </header>
-                        <div class="video-wrap">
-                            <video id="live-video" class="live-video" autoplay muted playsinline aria-label="Camera live stream"></video>
-                            <div id="video-placeholder" class="video-placeholder">
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="placeholder-icon">
-                                    <path d="M3 8h3l2-2h8l2 2h3v11H3z"/>
-                                    <circle cx="12" cy="13" r="4"/>
-                                </svg>
-                                <span data-i18n="camera.connecting">Connecting&hellip;</span>
-                            </div>
-                        </div>
-                    </article>
-
-                    <!-- Imaging Controls -->
-                    <article class="card">
-                        <header class="card-head">
-                            <div>
-                                <h2 class="card-title" data-i18n="camera.imaging">Imaging Controls</h2>
-                                <p class="card-sub" data-i18n="camera.imagingSub">Tune sensor parameters in real time.</p>
-                            </div>
-                            <div class="card-head-actions">
-                                <button class="btn btn-ghost btn-sm" id="btn-reset-imaging" type="button">
-                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="btn-icon">
-                                        <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
-                                        <path d="M3 3v5h5"/>
-                                    </svg>
-                                    <span data-i18n="camera.resetDefaults">Reset Defaults</span>
-                                </button>
-                            </div>
-                        </header>
-                        <div id="imaging-controls" class="imaging-controls"></div>
-                    </article>
-
-
-                </section>
-            </main>
+    <!-- ===== View: Live Preview ===== -->
+    <div id="view-preview" class="view active">
+      <div class="live-toolbar">
+        <div class="field hidden" id="live-camera-field">
+          <label for="live-camera-select" data-i18n="liveCamera">Live</label>
+          <select id="live-camera-select" class="camera-select"></select>
         </div>
+      </div>
+      <div class="stream-wrapper">
+        <video id="stream-video" autoplay muted playsinline style="width:100%;height:100%;object-fit:contain"></video>
+        <img id="stream-img" class="stream-img hidden" alt="live" style="width:100%;height:100%;object-fit:contain">
+        <span id="mjpeg-fallback-badge" class="stream-mode-badge hidden" data-i18n="fallbackMjpeg">MJPEG</span>
+        <!-- AI detection overlay (extension: ai) -->
+        <canvas id="detection-overlay" class="detection-box" aria-hidden="true"></canvas>
+        <div class="stream-hud hud-left">
+          <span class="live-dot" id="stream-live-dot" aria-hidden="true"></span>
+          <span id="stream-clock" class="stream-clock">--:--:--</span>
+          <span class="hud-sep">&middot;</span>
+          <span id="stream-health" class="stream-health">--&times;--</span>
+        </div>
+        <div class="stream-flip">
+          <button type="button" id="btn-hflip" class="stream-ctl-btn" aria-label="H flip" aria-pressed="false" title="H flip">
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M12 3v18" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M9 8L5 12l4 4M15 8l4 4-4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <button type="button" id="btn-vflip" class="stream-ctl-btn" aria-label="V flip" aria-pressed="false" title="V flip">
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M3 12h18" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M8 9l4-4 4 4M8 15l4 4 4-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+        </div>
+        <div class="stream-controls">
+          <button type="button" id="btn-snapshot" class="stream-ctl-btn" aria-label="Snapshot" title="Snapshot">
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M3 7h4l2-3h6l2 3h4v13H3V7z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><circle cx="12" cy="13" r="4" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+          </button>
+          <button type="button" id="btn-fullscreen" class="stream-ctl-btn" aria-label="Fullscreen" title="Fullscreen">
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+        </div>
+        <div id="stream-error" class="hidden">
+          <span id="stream-error-label" data-i18n="streamError">Stream unavailable</span>
+          <button type="button" id="stream-retry" class="btn-primary" data-i18n="retry">Retry</button>
+        </div>
+        <div class="stream-loading" id="stream-loading">
+          <div class="spinner"></div>
+          <span id="stream-loading-label" data-i18n="loading">Loading...</span>
+        </div>
+      </div>
+
+      <!-- PTZ panel (extension: ptz) -->
+      <div class="ptz-panel hidden" id="ptz-panel">
+        <h3 class="panel-title" data-i18n="ptzControl">PTZ Control</h3>
+        <div class="ptz-pad">
+          <button class="ptz-btn" data-dir="up" aria-label="Pan up"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <button class="ptz-btn" data-dir="left" aria-label="Pan left"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M19 12H5M12 19l-7-7 7-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <button class="ptz-btn home" data-dir="home" aria-label="Home position"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M3 11l9-7 9 7M5 10v10h14V10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <button class="ptz-btn" data-dir="right" aria-label="Pan right"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M5 12h14M12 5l7 7-7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <button class="ptz-btn" data-dir="down" aria-label="Pan down"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M12 5v14M5 12l7 7 7-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
+        <div class="ptz-zoom">
+          <label for="zoom-slider"><span data-i18n="zoom">Zoom</span>: <span id="zoom-value">1.0</span>x</label>
+          <input type="range" id="zoom-slider" min="0.5" max="5" step="0.1" value="1">
+        </div>
+        <div class="ptz-status">
+          <span data-i18n="pan">Pan</span>: <span id="ptz-pan">0&deg;</span> |
+          <span data-i18n="tilt">Tilt</span>: <span id="ptz-tilt">0&deg;</span>
+        </div>
+      </div>
+
+      <!-- Imaging controls (extension: imaging) -->
+      <div class="card imaging-section hidden" id="imaging-section">
+        <div class="imaging-header-row">
+          <h3 class="panel-title" data-i18n="imagingTitle">Imaging Controls</h3>
+          <button type="button" id="imaging-reset" class="btn-small" data-i18n="imagingReset">Reset defaults</button>
+        </div>
+        <div id="imaging-controls"></div>
+      </div>
     </div>
 
-    <!-- ========== Confirm Modal ========== -->
-    <div id="confirm-overlay" class="modal-overlay" hidden>
-        <div class="modal" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title">
-            <header class="modal-head">
-                <h3 id="confirm-title" class="modal-title">Confirm</h3>
-                <button class="icon-btn modal-close" id="btn-confirm-close" type="button" aria-label="Close">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
-                        <path d="M6 6l12 12M18 6L6 18"/>
-                    </svg>
-                </button>
-            </header>
-            <div class="modal-body">
-                <p id="confirm-message" class="confirm-message"></p>
-            </div>
-            <footer class="modal-foot">
-                <button class="btn" id="btn-confirm-no" type="button" data-i18n="actions.cancel">Cancel</button>
-                <button class="btn btn-danger" id="btn-confirm-yes" type="button">Confirm</button>
-            </footer>
-        </div>
+    <!-- ===== View: Cameras (multi_camera only) ===== -->
+    <div id="view-cameras" class="view">
+      <h2 data-i18n="camerasTitle">Cameras</h2>
+      <div id="cameras-grid" class="cameras-grid"></div>
     </div>
 
-    <!-- ========== ONVIF Credentials Modal ========== -->
-    <div id="modal-overlay" class="modal-overlay" hidden>
-        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
-            <header class="modal-head">
-                <h3 id="modal-title" class="modal-title" data-i18n="modal.editOnvif">Edit ONVIF Credentials</h3>
-                <button class="icon-btn modal-close" id="btn-modal-close" type="button" aria-label="Close">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
-                        <path d="M6 6l12 12M18 6L6 18"/>
-                    </svg>
-                </button>
-            </header>
-            <div class="modal-body">
-                <div class="form-group">
-                    <label class="form-label" for="input-onvif-user" data-i18n="modal.username">Username</label>
-                    <input class="form-input" type="text" id="input-onvif-user" autocomplete="username" required>
-                </div>
-                <div class="form-group">
-                    <label class="form-label" for="input-onvif-pass" data-i18n="modal.password">Password</label>
-                    <input class="form-input" type="password" id="input-onvif-pass" autocomplete="current-password" required>
-                </div>
-                <div id="modal-error" class="form-error" hidden></div>
-            </div>
-            <footer class="modal-foot">
-                <button class="btn" id="btn-cancel-onvif" type="button" data-i18n="actions.cancel">Cancel</button>
-                <button class="btn btn-primary" id="btn-save-onvif" type="button">
-                    <span class="btn-label" data-i18n="actions.saveRestart">Save &amp; Restart</span>
-                    <span class="btn-spinner" aria-hidden="true"></span>
-                </button>
-            </footer>
+    <!-- ===== View: Settings ===== -->
+    <div id="view-settings" class="view">
+      <div class="settings-header">
+        <h2 data-i18n="configTitle">Configuration</h2>
+        <div class="settings-actions">
+          <span id="unsaved-indicator" class="unsaved-indicator hidden" data-i18n="unsaved">Unsaved changes</span>
+          <button id="save-config" class="btn-primary" data-i18n="save">Save</button>
         </div>
-    </div>
-    <!-- ========== GB28181 Settings Modal ========== -->
-    <div id="gb28181-overlay" class="modal-overlay" hidden>
-        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="gb28181-modal-title">
-            <header class="modal-head">
-                <h3 id="gb28181-modal-title" class="modal-title" data-i18n="modal.editGb28181">Edit GB28181 Settings</h3>
-                <button class="icon-btn modal-close" id="btn-gb28181-close" type="button" aria-label="Close">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M6 6l12 12M18 6L6 18"/>
-                    </svg>
-                </button>
-            </header>
-            <div class="modal-body">
-                <div class="form-group">
-                    <label class="form-label">
-                        <input type="checkbox" id="gb28181-enabled">
-                        <span data-i18n="modal.gb28181.enabled">Enable GB28181</span>
-                    </label>
-                </div>
-                <div class="form-group">
-                    <label class="form-label" for="gb28181-platform_sip_address" data-i18n="modal.gb28181.platform_sip_address">Platform SIP Address</label>
-                    <input class="form-input" type="text" id="gb28181-platform_sip_address" required>
-                </div>
-                <div class="form-group">
-                    <label class="form-label" for="gb28181-platform_sip_port" data-i18n="modal.gb28181.platform_sip_port">Platform SIP Port</label>
-                    <input class="form-input" type="number" id="gb28181-platform_sip_port" min="1" max="65535">
-                </div>
-                <div class="form-group">
-                    <label class="form-label" for="gb28181-device_id" data-i18n="modal.gb28181.device_id">Device ID</label>
-                    <input class="form-input" type="text" id="gb28181-device_id" maxlength="20" required>
-                </div>
-                <div class="form-group">
-                    <label class="form-label" for="gb28181-channel_id" data-i18n="modal.gb28181.channel_id">Channel ID</label>
-                    <input class="form-input" type="text" id="gb28181-channel_id" maxlength="20">
-                </div>
-                <div class="form-group">
-                    <label class="form-label" for="gb28181-sip_domain" data-i18n="modal.gb28181.sip_domain">SIP Domain</label>
-                    <input class="form-input" type="text" id="gb28181-sip_domain">
-                </div>
-                <div class="form-group">
-                    <label class="form-label" for="gb28181-password" data-i18n="modal.gb28181.password">Password</label>
-                    <input class="form-input" type="password" id="gb28181-password">
-                </div>
-                <div class="form-group">
-                    <label class="form-label" for="gb28181-local_sip_port" data-i18n="modal.gb28181.local_sip_port">Local SIP Port</label>
-                    <input class="form-input" type="number" id="gb28181-local_sip_port" min="1" max="65535">
-                </div>
-                <div class="form-group">
-                    <label class="form-label" for="gb28181-register_interval_secs" data-i18n="modal.gb28181.register_interval_secs">Register Interval (secs)</label>
-                    <input class="form-input" type="number" id="gb28181-register_interval_secs" min="1">
-                </div>
-                <div class="form-group">
-                    <label class="form-label" for="gb28181-heartbeat_interval_secs" data-i18n="modal.gb28181.heartbeat_interval_secs">Heartbeat Interval (secs)</label>
-                    <input class="form-input" type="number" id="gb28181-heartbeat_interval_secs" min="1">
-                </div>
-                <div class="form-group">
-                    <label class="form-label" for="gb28181-heartbeat_timeout_count" data-i18n="modal.gb28181.heartbeat_timeout_count">Heartbeat Timeout Count</label>
-                    <input class="form-input" type="number" id="gb28181-heartbeat_timeout_count" min="1">
-                </div>
-                <div id="gb28181-error" class="form-error" hidden></div>
-            </div>
-            <footer class="modal-foot">
-                <button class="btn" id="btn-cancel-gb28181" type="button" data-i18n="actions.cancel">Cancel</button>
-                <button class="btn btn-primary" id="btn-save-gb28181" type="button">
-                    <span class="btn-label" data-i18n="actions.saveRestart">Save &amp; Restart</span>
-                    <span class="btn-spinner" aria-hidden="true"></span>
-                </button>
-            </footer>
+      </div>
+      <div id="config-apply-banner" class="apply-banner hidden" data-i18n="applyRestart">Some settings need a device restart to take effect</div>
+      <div class="settings-toggles">
+        <div class="toggle-row hidden" id="ptz-toggle-row">
+          <div class="toggle-info">
+            <label for="ptz-toggle" class="toggle-title" data-i18n="ptzControl">PTZ Control</label>
+            <span class="toggle-desc" data-i18n="ptzEnableDesc">Show direction controls on the Live view</span>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="ptz-toggle">
+            <span class="switch-slider"></span>
+          </label>
         </div>
+      </div>
+      <div id="config-loading" class="loading-state">
+        <div class="spinner"></div>
+        <span data-i18n="loading">Loading...</span>
+      </div>
+      <form id="config-form" class="hidden"></form>
     </div>
 
-    <!-- ========== Restart Banner ========== -->
-    <div id="restart-banner" class="restart-banner" hidden role="status" aria-live="assertive">
-        <div class="restart-inner">
-            <div class="spinner" aria-hidden="true"></div>
-            <span data-i18n="restart.message">Restarting service… Page will reload automatically.</span>
+    <!-- ===== View: Status ===== -->
+    <div id="view-status" class="view">
+      <h2 data-i18n="statusTitle">System Status</h2>
+      <div class="status-grid">
+        <div class="card">
+          <h3 data-i18n="cameraInfo">Camera Info</h3>
+          <div class="ptz-readings" id="camera-info"></div>
         </div>
+        <div class="card">
+          <h3 data-i18n="statusTitle">System</h3>
+          <div class="ptz-readings" id="device-info"></div>
+        </div>
+        <div class="card hidden" id="ptz-status-card">
+          <h3 data-i18n="ptzPosition">PTZ Position</h3>
+          <div class="ptz-readings">
+            <div class="reading"><span class="reading-label" data-i18n="pan">Pan</span><span class="reading-val" id="s-pan">0&deg;</span></div>
+            <div class="reading"><span class="reading-label" data-i18n="tilt">Tilt</span><span class="reading-val" id="s-tilt">0&deg;</span></div>
+            <div class="reading"><span class="reading-label" data-i18n="zoom">Zoom</span><span class="reading-val" id="s-zoom">1.0x</span></div>
+          </div>
+        </div>
+        <div class="card">
+          <h3 data-i18n="connection">Connection</h3>
+          <div class="conn-status">
+            <div class="conn-row" id="events-row"><span data-i18n="events">Events</span><span class="status-badge offline" id="events-badge">&bull; <span id="events-label" data-i18n="disconnected">Disconnected</span></span></div>
+            <div class="conn-row"><span data-i18n="apiLabel">API</span><span class="status-badge" id="api-badge">&bull; <span id="api-label" data-i18n="checking">Checking...</span></span></div>
+          </div>
+        </div>
+      </div>
     </div>
 
-    <!-- ========== Toast Container ========== -->
-    <div id="toast-stack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
+    <!-- ===== View: Devices (devices capability only) ===== -->
+    <div id="view-devices" class="view">
+      <h2 data-i18n="devicesTitle">Host Devices</h2>
+      <div class="card">
+        <h3 data-i18n="videoDevices">Video devices</h3>
+        <div id="video-devices"></div>
+      </div>
+      <div class="card">
+        <h3 data-i18n="audioDevices">Audio devices</h3>
+        <div id="audio-devices"></div>
+      </div>
+      <div class="card">
+        <h3 data-i18n="hostCaps">Host capabilities</h3>
+        <div class="ptz-readings" id="device-caps"></div>
+      </div>
+    </div>
+  </div>
 
-        <script src="/static/app.js"></script>
+  <!-- ===== Toast Container ===== -->
+  <div id="toast-container" aria-live="polite"></div>
+
+  <script type="module" src="/js/main.js"></script>
 </body>
 </html>

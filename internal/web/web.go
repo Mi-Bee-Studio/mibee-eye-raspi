@@ -7,36 +7,40 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/camera"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/config"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/h264"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Config holds the web server configuration.
 type Config struct {
-	Port           int                   // listen port (default 8088)
-	Username       string                // basic-auth user (default = onvif user)
-	Password       string                // basic-auth pass (default = onvif pass)
-	AllowedOrigins []string              // CORS allowed origins (default ["*"])
-	ConfigPath     string                // path to config.yaml (used by /api/config/onvif, /api/config/gb28181)
-	OnvifConfig    config.ConfigProvider  // read-only onvif/rtsp config
-	GB28181Config  *config.GB28181Config  // GB28181 configuration
-	Params         *camera.ParamManager
-	AUHub          *h264.AUHub
-	Version        string                // build version from ldflags
-	Logger         *log.Logger            // nil -> log.Default()
-	ReadHeaderTimeout time.Duration        // http.Server.ReadHeaderTimeout (0 = default 5s)
-	ReadTimeout       time.Duration        // http.Server.ReadTimeout (0 = default 10s)
-	WriteTimeout      time.Duration        // http.Server.WriteTimeout (0 = default 30s)
-	IdleTimeout       time.Duration        // http.Server.IdleTimeout (0 = default 120s)
-	CameraStatus func() bool    // returns camera alive status (nil = unavailable)
-	RTSPStatus   func() bool    // returns RTSP server status (nil = unavailable)
-	FrameRate    func() float64 // returns current fps (nil = unavailable)
-	Snapshot     http.Handler    // GET /snapshot handler (nil = disabled)
+	Port              int              // listen port (default 8088)
+	Username          string           // admin user (default = onvif user)
+	Password          string           // admin pass (default = onvif pass)
+	AllowedOrigins    []string         // CORS allowed origins (default ["*"])
+	ConfigPath        string           // path to config.yaml (used by PUT /api/config)
+	OnvifConfig       config.ConfigProvider // read-only onvif/rtsp config
+	GB28181Config     *config.GB28181Config // GB28181 configuration
+	Params            *camera.ParamManager  // imaging parameter manager
+	AUHub             *h264.AUHub           // H.264 access-unit hub
+	Version           string                // build version from ldflags
+	Logger            *log.Logger           // nil -> log.Default()
+	ReadHeaderTimeout time.Duration         // http.Server.ReadHeaderTimeout (0 = default 5s)
+	ReadTimeout       time.Duration         // http.Server.ReadTimeout (0 = default 10s)
+	WriteTimeout      time.Duration         // http.Server.WriteTimeout (0 = streaming endpoints)
+	IdleTimeout       time.Duration         // http.Server.IdleTimeout (0 = default 120s)
+	CameraStatus      func() bool           // returns camera alive status (nil = unavailable)
+	RTSPStatus        func() bool           // returns RTSP server status (nil = unavailable)
+	FrameRate         func() float64        // returns current fps (nil = unavailable)
+	Snapshot          http.Handler          // GET /snapshot handler (nil = disabled)
 }
 
 // Server is the web UI HTTP server.
@@ -44,10 +48,11 @@ type Server struct {
 	cfg          Config
 	logger       *log.Logger
 	mux          *http.ServeMux
-	hub          *wsHub
+	hub          *sseHub
 	loginLimiter *loginRateLimiter
 	server       *http.Server
 
+	mu             sync.RWMutex // guards username/password
 	username       string
 	password       string
 	sessions       *SessionStore
@@ -55,7 +60,8 @@ type Server struct {
 	startTime      time.Time
 }
 
-// New creates a new web server.
+// New creates a new web server. An empty password means first-boot state
+// (POST /api/auth/setup configures the admin).
 func New(cfg Config) *Server {
 	logger := cfg.Logger
 	if logger == nil {
@@ -71,12 +77,6 @@ func New(cfg Config) *Server {
 		password = cfg.OnvifConfig.ONVIFPassword()
 	}
 
-	sess, err := NewSessionStore(username, password)
-	if err != nil {
-		// This should not happen if password validation is done earlier, but guard anyway.
-		logger.Fatalf("web: %v", err)
-	}
-
 	origins := cfg.AllowedOrigins
 	if len(origins) == 0 {
 		origins = []string{"*"}
@@ -87,7 +87,7 @@ func New(cfg Config) *Server {
 		logger:          logger,
 		username:        username,
 		password:        password,
-		sessions:        sess,
+		sessions:        NewSessionStore(),
 		allowedOrigins:  origins,
 		loginLimiter:    &loginRateLimiter{attempts: make(map[string]*rateLimitEntry)},
 	}
@@ -101,21 +101,27 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	s.mux = http.NewServeMux()
-	s.hub = newWSHub(s.logger)
+	s.hub = newSSEHub(s.logger)
 
-	// Wire up hooks from ParamManager to WebSocket hub.
+	// Imaging parameter changes → SSE param_changed events (SPEC §6).
 	if s.cfg.Params != nil {
 		s.cfg.Params.SetOnChange(func(name string, value interface{}) {
-			s.hub.sendEvent(wsEvent{
-				Type:  "param-changed",
-				Name:  name,
-				Value: value,
+			s.hub.broadcast("param_changed", map[string]interface{}{
+				"camera_id": "0",
+				"name":      name,
+				"value":     value,
 			})
 		})
 	}
 
 	s.startTime = time.Now()
 	s.registerRoutes()
+
+	if !s.configured() {
+		s.logger.Printf("web: admin not configured — first-time setup state")
+	} else {
+		s.logger.Printf("web: session authentication enabled (user: %s)", s.username)
+	}
 
 	addr := net.JoinHostPort("0.0.0.0", strconv.Itoa(port))
 	readHeaderTimeout := s.cfg.ReadHeaderTimeout
@@ -128,7 +134,7 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	writeTimeout := s.cfg.WriteTimeout
 	if writeTimeout == 0 {
-		writeTimeout = 30 * time.Second
+		writeTimeout = 0 // streaming endpoints (SSE/MSE) must not time out
 	}
 	idleTimeout := s.cfg.IdleTimeout
 	if idleTimeout == 0 {
@@ -152,7 +158,7 @@ func (s *Server) Start(ctx context.Context) error {
 		close(errCh)
 	}()
 
-	go s.hub.run(ctx)
+	go s.hub.runLog(ctx)
 
 	select {
 	case <-ctx.Done():
@@ -167,83 +173,170 @@ func (s *Server) Stop() error {
 	if s.server == nil {
 		return nil
 	}
-	s.hub.close()
 	return s.server.Close()
 }
 
-// registerRoutes registers all HTTP routes on the server's ServeMux.
+// registerRoutes registers all HTTP routes (SPEC v1).
 func (s *Server) registerRoutes() {
 	m := s.mux
 
-	// Static assets — no auth required
-	m.HandleFunc("GET /{$}", s.handleIndex)
-	m.HandleFunc("GET /static/style.css", s.handleStaticFile("static/style.css", "text/css"))
-	m.HandleFunc("GET /static/app.js", s.handleStaticFile("static/app.js", "application/javascript"))
-	m.HandleFunc("GET /health", s.handleHealth)
-	m.HandleFunc("GET /api/version", s.handleVersion)
+	// Static assets (the shared mibee-webui build) — public.
+	m.HandleFunc("GET /{$}", s.handleStatic)
+	m.HandleFunc("GET /style.css", s.handleStatic)
+	m.HandleFunc("GET /js/", s.handleStatic)
 
-	// Auth endpoints — login is public, logout requires auth
-	m.HandleFunc("POST /api/login", s.handleLogin)
-	m.HandleFunc("POST /api/logout", s.authRequired(s.handleLogout))
+	// Public API (SPEC §1–2).
+	m.HandleFunc("GET /api/health", s.handleHealth)
+	m.HandleFunc("GET /api/auth/me", s.handleMe)
+	m.HandleFunc("POST /api/auth/setup", s.handleSetup)
+	m.HandleFunc("POST /api/auth/login", s.handleLogin)
+	m.HandleFunc("POST /api/auth/logout", s.handleLogout)
+	m.HandleFunc("POST /api/auth/reset", s.authRequired(s.handleReset))
 
-	// API routes — auth required (bearer token in Authorization header)
+	// Session-gated core (SPEC §3–5).
+	m.HandleFunc("GET /api/status", s.authRequired(s.handleStatus))
+	m.HandleFunc("GET /api/capabilities", s.authRequired(s.handleCapabilities))
+	m.HandleFunc("GET /api/cameras", s.authRequired(s.handleCameras))
+	m.HandleFunc("GET /api/cameras/{id}", s.authRequired(s.handleCameraGet))
+	m.HandleFunc("GET /api/cameras/{id}/snapshot", s.authRequired(s.handleCameraSnapshot))
+	m.HandleFunc("GET /api/cameras/{id}/stream.mse", s.authRequired(s.handleStreamMSEPath))
 	m.HandleFunc("GET /api/config", s.authRequired(s.handleGetConfig))
-	m.HandleFunc("POST /api/config/onvif", s.authRequired(s.handlePostConfigOnvif))
-	m.HandleFunc("POST /api/config/gb28181", s.authRequired(s.handlePostConfigGb28181))
-	m.HandleFunc("GET /api/camera/params", s.authRequired(s.handleGetCameraParams))
-	m.HandleFunc("POST /api/camera/param", s.authRequired(s.handlePostCameraParam))
-	m.HandleFunc("GET /api/camera/options", s.authRequired(s.handleGetCameraOptions))
+	m.HandleFunc("PUT /api/config", s.authRequired(s.handlePutConfig))
 
-	// WebSocket — auth via Authorization header
-	m.HandleFunc("GET /ws", s.authRequired(s.handleWS))
+	// Imaging extension (SPEC §4.5).
+	m.HandleFunc("GET /api/cameras/{id}/imaging/params", s.authRequired(s.handleGetCameraParams))
+	m.HandleFunc("GET /api/cameras/{id}/imaging/options", s.authRequired(s.handleGetCameraOptions))
+	m.HandleFunc("POST /api/cameras/{id}/imaging/param", s.authRequired(s.handlePostCameraParam))
 
-	// H.264 video stream via WebSocket — auth via Authorization header
-	m.HandleFunc("GET /api/stream/ws", s.authRequired(s.handleStreamWS))
+	// SSE events (SPEC §6).
+	m.HandleFunc("GET /api/events", s.authRequired(s.handleEvents))
 
-	// Snapshot endpoint — no auth (camera image, served to NVRs and web UI)
+	// Legacy snapshot for NVRs — byte-stable, deliberately open (dialect A2).
 	if s.cfg.Snapshot != nil {
 		m.HandleFunc("GET /snapshot", s.cfg.Snapshot.ServeHTTP)
 	}
 }
 
-// Mux returns the server's ServeMux, allowing external packages to register routes.
-// The returned mux is nil until Start() is called.
+// Mux returns the server's ServeMux, allowing external packages to register
+// routes (HLS mounts here). Nil until Start() is called.
 func (s *Server) Mux() *http.ServeMux {
 	return s.mux
 }
 
-// wsEvent represents a WebSocket event to broadcast.
-type wsEvent struct {
-	Type  string      `json:"type"`
-	Name  string      `json:"name,omitempty"`
-	Value interface{} `json:"value,omitempty"`
+// handleCameraGet serves GET /api/cameras/{id} (single camera, id "0").
+func (s *Server) handleCameraGet(w http.ResponseWriter, r *http.Request) {
+	if r.PathValue("id") != "0" {
+		writeError(w, http.StatusNotFound, "no such camera")
+		return
+	}
+	writeOK(w, http.StatusOK, s.cameraDoc())
+}
+
+// handleCameraSnapshot serves GET /api/cameras/{id}/snapshot (JPEG).
+func (s *Server) handleCameraSnapshot(w http.ResponseWriter, r *http.Request) {
+	if r.PathValue("id") != "0" {
+		writeError(w, http.StatusNotFound, "no such camera")
+		return
+	}
+	if s.cfg.Snapshot == nil {
+		http.Error(w, "snapshot not available", http.StatusServiceUnavailable)
+		return
+	}
+	s.cfg.Snapshot.ServeHTTP(w, r)
+}
+
+// handleStreamMSEPath adapts the path-param route onto handleStreamMSE.
+func (s *Server) handleStreamMSEPath(w http.ResponseWriter, r *http.Request) {
+	s.handleStreamMSE(w, r, r.PathValue("id"))
+}
+
+// handleStatic serves the embedded shared frontend (index.html, style.css,
+// js/*) with an SPA fallback.
+func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/")
+	if path == "" {
+		path = "static/index.html"
+	} else {
+		path = "static/" + path
+	}
+	data, err := staticFS.ReadFile(path)
+	if err != nil {
+		// SPA fallback for unknown paths.
+		if index, ierr := staticFS.ReadFile("static/index.html"); ierr == nil {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			w.Write(index)
+			return
+		}
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", mimeByExt(path))
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Write(data)
+}
+
+func mimeByExt(path string) string {
+	switch {
+	case strings.HasSuffix(path, ".html"):
+		return "text/html; charset=utf-8"
+	case strings.HasSuffix(path, ".css"):
+		return "text/css"
+	case strings.HasSuffix(path, ".js"):
+		return "application/javascript; charset=utf-8"
+	case strings.HasSuffix(path, ".json"):
+		return "application/json"
+	case strings.HasSuffix(path, ".svg"):
+		return "image/svg+xml"
+	default:
+		return "application/octet-stream"
+	}
+}
+
+// persistWebCredentials writes the web section of the YAML config file so
+// setup/reset survive a restart. Best-effort: memory credentials still apply.
+func (s *Server) persistWebCredentials(username, password string) error {
+	if s.cfg.ConfigPath == "" {
+		return fmt.Errorf("config path not configured")
+	}
+	data, err := os.ReadFile(s.cfg.ConfigPath)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	var cfg map[string]interface{}
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+	cfg["web"] = map[string]interface{}{
+		"enabled":  true,
+		"port":     s.cfg.Port,
+		"username": username,
+		"password": password,
+	}
+	out, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	return atomicWrite(s.cfg.ConfigPath, out)
 }
 
 // writeJSON writes a JSON response with the given status code.
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	data, err := json.Marshal(v)
 	if err != nil {
-		http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+		http.Error(w, `{"ok":false,"error":"internal_error"}`, http.StatusInternalServerError)
 		return
 	}
-
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	w.Write(data)
 	w.Write([]byte("\n"))
 }
 
-// writeError writes a JSON error response.
-func writeError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]string{"error": msg})
-}
-
 // securityHeaders sets security-related HTTP headers on all responses.
-// Content-Security-Policy is only applied to HTML page routes, not API/media endpoints.
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Strip sensitive credentials from URL query parameters.
-		// Prevents credential leakage via browser history, server logs, and Referer headers.
 		if q := r.URL.Query(); q.Has("password") || q.Has("username") {
 			q.Del("username")
 			q.Del("password")
@@ -259,20 +352,20 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 
-		// CSP only on HTML pages (root and static assets), not on API/media routes.
+		// CSP only on HTML/static routes (no WebSocket anymore: connect-src
+		// 'self' covers fetch + EventSource).
 		path := r.URL.Path
-		if path == "/" || strings.HasPrefix(path, "/static/") {
+		if path == "/" || strings.HasPrefix(path, "/js/") || path == "/style.css" {
 			w.Header().Set("Content-Security-Policy",
 				"default-src 'none'; "+
 					"script-src 'self'; "+
 					"style-src 'self' 'unsafe-inline'; "+
 					"img-src 'self' data: blob:; "+
 					"font-src 'self'; "+
-					"connect-src 'self' ws: wss:; "+
+					"connect-src 'self'; "+
 					"media-src 'self' blob:; "+
 					"base-uri 'self'; "+
 					"form-action 'self'; "+
-
 					"frame-ancestors 'none'")
 		}
 
@@ -281,113 +374,47 @@ func securityHeaders(next http.Handler) http.Handler {
 }
 
 // corsMiddleware restricts CORS access to allowed origins.
-// When AllowedOrigins contains "*", it stays backward-compatible (allow all origins).
-// Otherwise, it checks the Origin header against the allowed list and echoes it back.
 func (s *Server) corsMiddleware(next http.Handler) http.Handler {
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        origin := r.Header.Get("Origin")
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			allowed := false
+			for _, o := range s.allowedOrigins {
+				if o == "*" || o == origin {
+					allowed = true
+					break
+				}
+			}
+			if allowed {
+				if len(s.allowedOrigins) == 1 && s.allowedOrigins[0] == "*" {
+					w.Header().Set("Access-Control-Allow-Origin", "*")
+				} else {
+					w.Header().Set("Access-Control-Allow-Origin", origin)
+				}
+			}
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-CSRF-Token")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
 
-        if origin != "" {
-            allowed := false
-            for _, o := range s.allowedOrigins {
-                if o == "*" || o == origin {
-                    allowed = true
-                    break
-                }
-            }
-            if allowed {
-                if len(s.allowedOrigins) == 1 && s.allowedOrigins[0] == "*" {
-                    w.Header().Set("Access-Control-Allow-Origin", "*")
-                } else {
-                    w.Header().Set("Access-Control-Allow-Origin", origin)
-                }
-            }
-            // Always set these CORS headers regardless of origin match
-            w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-            w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-            w.Header().Set("Access-Control-Allow-Credentials", "true")
-
-            // Handle preflight
-            if r.Method == http.MethodOptions {
-                w.WriteHeader(http.StatusNoContent)
-                return
-            }
-        }
-
-        next.ServeHTTP(w, r)
-    })
-}
-
-// handleIndex serves the embedded index.html.
-func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	data, err := staticFS.ReadFile("static/index.html")
-	if err != nil {
-		http.Error(w, "index.html not found", http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write(data)
-}
-
-// handleStaticFile serves an embedded static file.
-func (s *Server) handleStaticFile(path, contentType string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		data, err := staticFS.ReadFile(path)
-		if err != nil {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
 		}
-		w.Header().Set("Content-Type", contentType)
-		w.Write(data)
-	}
-}
-
-// handleHealth returns a health check with optional subsystem status.
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	resp := map[string]interface{}{
-		"status": "ok",
-		"uptime": time.Since(s.startTime).String(),
-	}
-
-	if s.cfg.CameraStatus != nil {
-		alive := s.cfg.CameraStatus()
-		resp["camera"] = alive
-		if !alive {
-			resp["status"] = "degraded"
-		}
-	}
-	if s.cfg.RTSPStatus != nil {
-		alive := s.cfg.RTSPStatus()
-		resp["rtsp"] = alive
-		if !alive {
-			resp["status"] = "degraded"
-		}
-	}
-	if s.cfg.FrameRate != nil {
-		resp["frame_rate"] = s.cfg.FrameRate()
-	}
-
-	writeJSON(w, http.StatusOK, resp)
-}
-
-// handleVersion returns the build version.
-func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{
-		"version": s.cfg.Version,
+		next.ServeHTTP(w, r)
 	})
 }
 
-
-// maskPassword returns "***" if the password is non-empty, "" otherwise.
+// maskPassword returns "****" if the password is non-empty, "" otherwise
+// (SPEC §5).
 func maskPassword(pw string) string {
 	if pw == "" {
 		return ""
 	}
-	return "***"
+	return "****"
 }
 
-// coerceFloat64 converts JSON-decoded float64 to appropriate Go type for ParamManager.
-// JSON numbers always decode as float64; this converts to int for integer params.
+// coerceFloat64 converts JSON-decoded float64 to int for integer params.
 func coerceFloat64(v interface{}) interface{} {
 	f, ok := v.(float64)
 	if !ok {
@@ -398,3 +425,4 @@ func coerceFloat64(v interface{}) interface{} {
 	}
 	return f
 }
+

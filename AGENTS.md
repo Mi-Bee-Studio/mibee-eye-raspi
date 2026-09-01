@@ -56,6 +56,15 @@ Local recording (optional) — H.264 segments recordings/YYYY-MM-DD/HH/MMSS.h264
 Web Admin UI (:8088) — MSE live preview, imaging controls, config editor
 ```
 
+### Unified Web API (SPEC v1, since 2026-08-31)
+
+The web layer implements the MiBee camera unified SPEC (`../mibee-webui/SPEC.md`):
+session-cookie auth + CSRF (`/api/auth/*`), `{"ok","data"}/{"ok","error","message"}` envelope,
+`/api/cameras` resource model (fixed id "0"), server-side fMP4 over chunked HTTP
+(`/api/cameras/0/stream.mse`), SSE `/api/events`, `PUT /api/config` deep-merge (restarts via
+SIGTERM), capability superset. The embedded frontend is the shared mibee-webui build.
+**`/snapshot` (open, for NVRs), HLS and :9100 metrics are unchanged device dialects.**
+
 ### Startup wiring order (`cmd/server/main.go`)
 
 1. Camera (mtxrpicam subprocess or external RTSP source)
@@ -159,7 +168,7 @@ ONVIF password is **required** — service refuses to start if empty. Set via `o
 | Fix discovery | `internal/onvif/discovery.go` (UDP multicast + HTTP POST probe) |
 | Fix snapshot | `internal/onvif/snapshot.go` (SnapshotBuffer stores latest IDR; dual-tier: rpicam-still + H.264 IDR fallback) |
 | Fix auth | `internal/onvif/auth.go` (WS-UsernameToken: PasswordText + PasswordDigest SHA1) |
-| Change web UI | `internal/web/static/` (app.js, index.html, style.css — embedded via `//go:embed`) |
+| Change web UI | `../mibee-webui/` (shared frontend source of truth) → `make sync-go` there copies into `internal/web/static/` (embedded via `//go:embed all:static`) |
 | Fix SPS/PPS injection | `cmd/server/main.go` (goroutine in Step 2, caches SPS/PPS, injects before IDR) |
 | Add recording settings | `internal/recording/` (Writer/Index/Retention) + `internal/config/config.go` (RecordingConfig) |
 | Add GB28181 settings | `internal/gb28181/` (SIP server, RTP push, PS mux) + `internal/config/config.go` (GB28181Config struct) + `internal/web/static/app.js` (settings panel) |
@@ -219,3 +228,11 @@ on the other end.
 ## Issue tracking
 
 This repo's GitHub (https://github.com/Mi-Bee-Studio/mibee-eye-raspi/issues) is the **central issue tracker for BOTH Pi camera projects** — Go (`rpi3b-cam`) and Rust (`mibee-eye-raspi-rs`). NVR team files all discovered interop bugs here. Do not split issues across repos.
+
+## 协议优先 + 全面 TDD（2026-09-01 起生效，HARD）
+
+完整规范见工作区根 `AGENTS.md`（唯一真源）。要点：
+
+- 本项目消费 `gb28181-go/device` + `onvif-go/v2`（git 依赖）。凡新增/改进功能涉及**协议层代码**（线格式、SOAP/SIP/MANSCDP 报文、摘要认证、SDP、RTP/PS、WS-Discovery 语义、协议级超时重传），**必须先在对应协议库 TDD 实现**（失败测试→实现→golden 契约→CI 绿→PR 合并），本项目只升 git pin + 写调用胶水。禁止在产品仓库复制或 patch 协议逻辑。
+- 线上急修唯一例外：产品侧临时绕过须标注 `// HOTFIX(protocol-debt)` + 库仓库开 issue + 两个迭代内在库内正式实现并移除。
+- 全面 TDD：测试与代码同提交、禁止事后补测；bug 修复先写复现失败测试；`go test`（含 `-race`）不过不提交。
