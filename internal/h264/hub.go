@@ -20,16 +20,27 @@ type Subscriber struct {
 	ID      string
 	Channel chan AccessUnit
 	cancel  context.CancelFunc
+
+	// dropped counts units lost because this subscriber's channel was full.
+	// Consumers that serialize the stream (MSE fMP4) must watch it: a lost
+	// unit leaves a reference-frame hole and only an IDR realigns decoders.
+	dropped atomic.Uint64
+}
+
+// Dropped reports how many access units were dropped for this subscriber
+// because its channel buffer was full.
+func (s *Subscriber) Dropped() uint64 {
+	return s.dropped.Load()
 }
 
 // AUHub fans out access units to multiple subscribers.
 // Thread-safe via embedded mutex.
 type AUHub struct {
-	mu                    sync.Mutex
-	subscribers           map[string]*Subscriber
-	nextID                int
-	droppedAUs            atomic.Uint64 // total dropped AUs across all subscribers
-	subscriberBufferSize  int
+	mu                   sync.Mutex
+	subscribers          map[string]*Subscriber
+	nextID               int
+	droppedAUs           atomic.Uint64 // total dropped AUs across all subscribers
+	subscriberBufferSize int
 }
 
 func NewAUHub() *AUHub {
@@ -77,6 +88,8 @@ func (h *AUHub) Write(au AccessUnit) {
 		case sub.Channel <- au:
 		default:
 			// Subscriber too slow — drop frame to avoid blocking the writer.
+			// Per-subscriber count lets the consumer detect the hole.
+			sub.dropped.Add(1)
 			h.droppedAUs.Add(1)
 		}
 	}

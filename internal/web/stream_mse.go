@@ -12,6 +12,34 @@ import (
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/h264"
 )
 
+// realignTracker gates serialization after stream loss. A unit lost to a
+// full subscriber channel (or skipped while draining backlog) leaves a
+// reference-frame hole; continuing with dependent frames freezes decoders
+// until an IDR arrives. The tracker blocks everything but keyframes until
+// one realigns the sequence.
+type realignTracker struct {
+	needKey   bool
+	seenDrops uint64
+}
+
+// allow reports whether au may be serialized. dropped is the subscriber's
+// current drop counter; drained is true when the handler fast-forwarded
+// through backlog and landed on a non-keyframe (a skipped range).
+func (rt *realignTracker) allow(au h264.AccessUnit, dropped uint64, drained bool) bool {
+	if dropped != rt.seenDrops {
+		rt.seenDrops = dropped
+		rt.needKey = true
+	}
+	if drained {
+		rt.needKey = true
+	}
+	if rt.needKey && !au.KeyFrame {
+		return false
+	}
+	rt.needKey = false
+	return true
+}
+
 // handleStreamMSE streams H.264 as fMP4 over chunked HTTP.
 func (s *Server) handleStreamMSE(w http.ResponseWriter, r *http.Request, cameraID string) {
 	if cameraID != "0" {
@@ -38,6 +66,7 @@ func (s *Server) handleStreamMSE(w http.ResponseWriter, r *http.Request, cameraI
 
 	var cachedSPS, cachedPPS []byte
 	initialized := false
+	rt := realignTracker{seenDrops: sub.Dropped()}
 	var sequence uint32
 	var prevFrame time.Time
 	var mediaClock uint64
@@ -49,14 +78,19 @@ func (s *Server) handleStreamMSE(w http.ResponseWriter, r *http.Request, cameraI
 		default:
 		}
 
-		// Fast-forward: drain stale non-keyframes when we fall behind.
+		// Fast-forward: drain stale units when we fall behind. Landing on a
+		// keyframe is a clean jump; landing elsewhere leaves a hole and the
+		// realign tracker below waits for the next IDR.
+		drainedNonKey := false
 		for len(sub.Channel) > 2 {
 			candidate := <-sub.Channel
 			if candidate.KeyFrame {
 				au = candidate
+				drainedNonKey = false
 				break
 			}
 			au = candidate
+			drainedNonKey = true
 		}
 
 		// Update the SPS/PPS cache from whatever this AU carries.
@@ -79,6 +113,10 @@ func (s *Server) handleStreamMSE(w http.ResponseWriter, r *http.Request, cameraI
 			}
 			flusher.Flush()
 			initialized = true
+		} else if !rt.allow(au, sub.Dropped(), drainedNonKey) {
+			// Loss realignment: wait for an IDR instead of feeding decoders
+			// frames whose references were dropped or skipped.
+			continue
 		}
 
 		nalus := make([][]byte, 0, len(au.NALUs))

@@ -13,9 +13,9 @@ func makeTestAU(keyFrame bool) AccessUnit {
 		typ = 0x65 // IDR
 	}
 	return AccessUnit{
-		NALUs:    []NALU{{Type: typ & 0x1F, Data: []byte{typ, 0x00, 0x01}}},
+		NALUs:     []NALU{{Type: typ & 0x1F, Data: []byte{typ, 0x00, 0x01}}},
 		Timestamp: time.Now(),
-		KeyFrame: keyFrame,
+		KeyFrame:  keyFrame,
 	}
 }
 
@@ -244,5 +244,32 @@ func TestSubscribeLeak100Cycles(t *testing.T) {
 		if count := hub.SubscriberCount(); count != 0 {
 			t.Fatalf("cycle %d: expected 0 subscribers after unsubscribe, got %d", i, count)
 		}
+	}
+}
+
+// TestSubscriberDroppedCounter verifies the per-subscriber drop counter that
+// stream serializers (MSE fMP4) watch to realign on the next IDR.
+func TestSubscriberDroppedCounter(t *testing.T) {
+	hub := NewAUHubWithSize(2)
+	sub := hub.Subscribe(t.Context())
+	defer hub.Unsubscribe(sub.ID)
+
+	for range 5 {
+		hub.Write(AccessUnit{KeyFrame: true, NALUs: []NALU{{Data: []byte{0x67}}}})
+	}
+
+	if got := sub.Dropped(); got != 3 {
+		t.Fatalf("Dropped() = %d, want 3 (5 written, buffer 2, none read)", got)
+	}
+	if got := hub.DroppedAUs(); got != 3 {
+		t.Fatalf("DroppedAUs() = %d, want 3", got)
+	}
+	select {
+	case <-sub.Channel:
+	default:
+		t.Fatal("buffered units must still be delivered")
+	}
+	if got := sub.Dropped(); got != 3 {
+		t.Fatalf("Dropped() changed after draining: %d", got)
 	}
 }
