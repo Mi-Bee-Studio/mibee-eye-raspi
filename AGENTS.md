@@ -228,3 +228,11 @@ on the other end.
 ## Issue tracking
 
 This repo's GitHub (https://github.com/Mi-Bee-Studio/mibee-eye-raspi/issues) is the **central issue tracker for BOTH Pi camera projects** — Go (`rpi3b-cam`) and Rust (`mibee-eye-raspi-rs`). NVR team files all discovered interop bugs here. Do not split issues across repos.
+
+## 协议优先 + 全面 TDD（2026-09-01 起生效，HARD）
+
+完整规范见工作区根 `AGENTS.md`（唯一真源）。要点：
+
+- 本项目消费 `gb28181-go/device` + `onvif-go/v2`（git 依赖）。凡新增/改进功能涉及**协议层代码**（线格式、SOAP/SIP/MANSCDP 报文、摘要认证、SDP、RTP/PS、WS-Discovery 语义、协议级超时重传），**必须先在对应协议库 TDD 实现**（失败测试→实现→golden 契约→CI 绿→PR 合并），本项目只升 git pin + 写调用胶水。禁止在产品仓库复制或 patch 协议逻辑。
+- 线上急修唯一例外：产品侧临时绕过须标注 `// HOTFIX(protocol-debt)` + 库仓库开 issue + 两个迭代内在库内正式实现并移除。
+- 全面 TDD：测试与代码同提交、禁止事后补测；bug 修复先写复现失败测试；`go test`（含 `-race`）不过不提交。
