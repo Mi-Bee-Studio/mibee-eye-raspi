@@ -19,8 +19,8 @@ func (m *mockOnvifConfig) CameraBitrate() int         { return 2000000 }
 func (m *mockOnvifConfig) CameraWidth() int           { return 1280 }
 func (m *mockOnvifConfig) CameraHeight() int          { return 720 }
 func (m *mockOnvifConfig) CameraFPS() int             { return 15 }
-func (m *mockOnvifConfig) CameraHFlip() bool           { return false }
-func (m *mockOnvifConfig) CameraVFlip() bool           { return false }
+func (m *mockOnvifConfig) CameraHFlip() bool          { return false }
+func (m *mockOnvifConfig) CameraVFlip() bool          { return false }
 func (m *mockOnvifConfig) DeviceName() string         { return "Test Camera" }
 func (m *mockOnvifConfig) DeviceManufacturer() string { return "Test Manufacturer" }
 func (m *mockOnvifConfig) DeviceModel() string        { return "TestModel" }

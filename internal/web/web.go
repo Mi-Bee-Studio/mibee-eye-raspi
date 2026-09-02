@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/camera"
@@ -22,11 +23,11 @@ import (
 
 // Config holds the web server configuration.
 type Config struct {
-	Port              int              // listen port (default 8088)
-	Username          string           // admin user (default = onvif user)
-	Password          string           // admin pass (default = onvif pass)
-	AllowedOrigins    []string         // CORS allowed origins (default ["*"])
-	ConfigPath        string           // path to config.yaml (used by PUT /api/config)
+	Port              int                   // listen port (default 8088)
+	Username          string                // admin user (default = onvif user)
+	Password          string                // admin pass (default = onvif pass)
+	AllowedOrigins    []string              // CORS allowed origins (default ["*"])
+	ConfigPath        string                // path to config.yaml (used by PUT /api/config)
 	OnvifConfig       config.ConfigProvider // read-only onvif/rtsp config
 	GB28181Config     *config.GB28181Config // GB28181 configuration
 	Params            *camera.ParamManager  // imaging parameter manager
@@ -58,6 +59,9 @@ type Server struct {
 	sessions       *SessionStore
 	allowedOrigins []string
 	startTime      time.Time
+	// Process restart for PUT /api/config and POST /api/system/restart
+	// (SPEC §5.1). Injectable so tests can observe instead of dying.
+	selfRestart func()
 }
 
 // New creates a new web server. An empty password means first-boot state
@@ -83,13 +87,19 @@ func New(cfg Config) *Server {
 	}
 
 	return &Server{
-		cfg:             cfg,
-		logger:          logger,
-		username:        username,
-		password:        password,
-		sessions:        NewSessionStore(),
-		allowedOrigins:  origins,
-		loginLimiter:    &loginRateLimiter{attempts: make(map[string]*rateLimitEntry)},
+		cfg:            cfg,
+		logger:         logger,
+		username:       username,
+		password:       password,
+		sessions:       NewSessionStore(),
+		allowedOrigins: origins,
+		loginLimiter:   &loginRateLimiter{attempts: make(map[string]*rateLimitEntry)},
+		selfRestart: func() {
+			go func() {
+				<-time.After(500 * time.Millisecond)
+				_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
+			}()
+		},
 	}
 }
 
@@ -202,6 +212,7 @@ func (s *Server) registerRoutes() {
 	m.HandleFunc("GET /api/cameras/{id}/stream.mse", s.authRequired(s.handleStreamMSEPath))
 	m.HandleFunc("GET /api/config", s.authRequired(s.handleGetConfig))
 	m.HandleFunc("PUT /api/config", s.authRequired(s.handlePutConfig))
+	m.HandleFunc("POST /api/system/restart", s.authRequired(s.handleSystemRestart))
 
 	// Imaging extension (SPEC §4.5).
 	m.HandleFunc("GET /api/cameras/{id}/imaging/params", s.authRequired(s.handleGetCameraParams))
@@ -425,4 +436,3 @@ func coerceFloat64(v interface{}) interface{} {
 	}
 	return f
 }
-

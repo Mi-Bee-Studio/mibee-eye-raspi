@@ -8,8 +8,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"syscall"
-	"time"
 
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/camera"
 
@@ -156,12 +154,17 @@ func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.logger.Printf("web: config updated, restarting in 500ms")
-	go func() {
-		<-time.After(500 * time.Millisecond)
-		_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
-	}()
+	s.selfRestart()
 
 	writeOK(w, http.StatusOK, map[string]interface{}{"applied": "restart"})
+}
+
+// handleSystemRestart implements POST /api/system/restart (SPEC §5.1): apply
+// all saved restart-semantics config by restarting the service process.
+func (s *Server) handleSystemRestart(w http.ResponseWriter, r *http.Request) {
+	s.logger.Printf("web: restart requested via /api/system/restart")
+	s.selfRestart()
+	writeOK(w, http.StatusOK, map[string]interface{}{"status": "restarting"})
 }
 
 // restoreMaskedSecrets replaces "****" password values in the update with

@@ -106,6 +106,7 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 			"default":  "restart",
 			"sections": map[string]string{"imaging": "immediate"},
 		},
+		"restart": true,
 	}
 	device := map[string]interface{}{"name": "MiBee Eye"}
 	if oc != nil {
