@@ -105,6 +105,10 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		"config_apply": map[string]interface{}{
 			"default":  "restart",
 			"sections": map[string]string{"imaging": "immediate"},
+			// SPEC §3.1: saving restart-sections self-restarts the service
+			// immediately (附录A #10) — the frontend waits for recovery
+			// instead of offering a manual restart entry.
+			"auto": true,
 		},
 		"restart": true,
 	}

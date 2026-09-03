@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -16,8 +17,10 @@ import (
 
 // SPEC v1 §2 session auth: cookie session + CSRF double-submit.
 //
-// - `session` cookie: HttpOnly, SameSite=Strict, 24h (in-memory store — a
-//   process restart signs everyone out; accepted device dialect A3).
+// - `session` cookie: HttpOnly, SameSite=Strict, 24h. The store persists to
+//   disk when a path is configured (NewSessionStoreAt) so the deliberate
+//   self-restarts (config save, imaging flips, /api/system/restart) keep
+//   browsers signed in (附录A #10); logout/reset still clear it.
 // - `csrf-token` cookie: readable by JS; every state-changing /api request
 //   must echo it in the X-CSRF-Token header (login/setup/logout exempt).
 // - First boot (no password configured): /api/auth/me answers 503
@@ -58,19 +61,85 @@ type session struct {
 	expiresAt time.Time
 }
 
-// SessionStore manages in-memory cookie sessions.
+// SessionStore manages cookie sessions. In-memory by default; with a path
+// (NewSessionStoreAt) it round-trips them to disk so self-restarts keep
+// sessions alive.
 type SessionStore struct {
 	mu       sync.RWMutex
 	sessions map[string]session
+	path     string
 }
 
-// NewSessionStore creates an empty session store. Credentials live on the
-// Server (they may change via setup/reset); an empty password simply means
-// first-boot state.
+// NewSessionStore creates an empty in-memory session store. Credentials
+// live on the Server (they may change via setup/reset); an empty password
+// simply means first-boot state.
 func NewSessionStore() *SessionStore {
 	s := &SessionStore{sessions: make(map[string]session)}
 	go s.cleanup()
 	return s
+}
+
+// sessionRecord is the on-disk shape of a session (web-sessions.json).
+type sessionRecord struct {
+	Username  string    `json:"username"`
+	CSRF      string    `json:"csrf"`
+	CreatedAt time.Time `json:"created_at"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+type sessionsDoc struct {
+	Version  int                       `json:"version"`
+	Sessions map[string]sessionRecord `json:"sessions"`
+}
+
+// NewSessionStoreAt loads (or creates) a session store backed by path.
+// Expired entries are pruned at load; a missing or corrupt file degrades
+// to an empty store — sessions are a cache, never worth failing startup.
+func NewSessionStoreAt(path string) *SessionStore {
+	s := &SessionStore{sessions: make(map[string]session), path: path}
+	data, err := os.ReadFile(path)
+	if err == nil {
+		var doc sessionsDoc
+		if json.Unmarshal(data, &doc) == nil {
+			now := time.Now()
+			for token, rec := range doc.Sessions {
+				if now.After(rec.ExpiresAt) {
+					continue
+				}
+				s.sessions[token] = session{
+					username:  rec.Username,
+					csrf:      rec.CSRF,
+					createdAt: rec.CreatedAt,
+					expiresAt: rec.ExpiresAt,
+				}
+			}
+		}
+	}
+	go s.cleanup()
+	return s
+}
+
+// persistLocked snapshots the store to disk (best effort). Caller holds
+// the write lock. atomicWrite creates the temp file 0600, so the file is
+// never group/world-readable.
+func (s *SessionStore) persistLocked() {
+	if s.path == "" {
+		return
+	}
+	doc := sessionsDoc{Version: 1, Sessions: make(map[string]sessionRecord, len(s.sessions))}
+	for token, sess := range s.sessions {
+		doc.Sessions[token] = sessionRecord{
+			Username:  sess.username,
+			CSRF:      sess.csrf,
+			CreatedAt: sess.createdAt,
+			ExpiresAt: sess.expiresAt,
+		}
+	}
+	data, err := json.Marshal(doc)
+	if err != nil {
+		return
+	}
+	_ = atomicWrite(s.path, data)
 }
 
 func newToken() (string, error) {
@@ -99,6 +168,7 @@ func (s *SessionStore) Create(username string) (string, string, error) {
 		createdAt: now,
 		expiresAt: now.Add(sessionTTL),
 	}
+	s.persistLocked()
 	s.mu.Unlock()
 	return token, csrf, nil
 }
@@ -123,13 +193,14 @@ func (s *SessionStore) Validate(token string) (string, string, error) {
 	return sess.username, sess.csrf, nil
 }
 
-// Logout invalidates a session. No-op if the token is empty/invalid.
+// Logout invalidates a session. No-op if the token is the empty string.
 func (s *SessionStore) Logout(token string) {
 	if token == "" {
 		return
 	}
 	s.mu.Lock()
 	delete(s.sessions, token)
+	s.persistLocked()
 	s.mu.Unlock()
 }
 
@@ -137,6 +208,7 @@ func (s *SessionStore) Logout(token string) {
 func (s *SessionStore) Clear() {
 	s.mu.Lock()
 	s.sessions = make(map[string]session)
+	s.persistLocked()
 	s.mu.Unlock()
 }
 

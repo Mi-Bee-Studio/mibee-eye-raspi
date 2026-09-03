@@ -280,6 +280,12 @@ func TestStatusAndCapabilitiesShape(t *testing.T) {
 	if caps["mjpeg"] != false {
 		t.Fatal("Go dialect: no MJPEG")
 	}
+	// The frontend keys the save→restart UX on this flag (SPEC §3.1):
+	// saving restart-sections self-restarts the service, so the UI waits
+	// for recovery instead of offering a manual restart entry.
+	if ca, ok := caps["config_apply"].(map[string]interface{}); !ok || ca["auto"] != true {
+		t.Fatalf("config_apply.auto must be true on the Go dialect, got %v", caps["config_apply"])
+	}
 	if caps["mse"] != false { // no AUHub wired here
 		t.Fatal("mse follows AUHub availability")
 	}

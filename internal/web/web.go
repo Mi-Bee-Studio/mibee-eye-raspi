@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -86,12 +87,21 @@ func New(cfg Config) *Server {
 		origins = []string{"*"}
 	}
 
+	// Sessions persist next to the config file so the deliberate
+	// self-restarts (config save, flips, /api/system/restart) keep
+	// browsers signed in (SPEC 附录A #10). Best effort — a load failure
+	// falls back to an in-memory store.
+	sessions := NewSessionStore()
+	if cfg.ConfigPath != "" {
+		sessions = NewSessionStoreAt(filepath.Join(filepath.Dir(cfg.ConfigPath), "web-sessions.json"))
+	}
+
 	return &Server{
 		cfg:            cfg,
 		logger:         logger,
 		username:       username,
 		password:       password,
-		sessions:       NewSessionStore(),
+		sessions:       sessions,
 		allowedOrigins: origins,
 		loginLimiter:   &loginRateLimiter{attempts: make(map[string]*rateLimitEntry)},
 		selfRestart: func() {
