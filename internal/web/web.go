@@ -8,11 +8,14 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
+	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/ai"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/camera"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/config"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/h264"
@@ -22,15 +25,16 @@ import (
 
 // Config holds the web server configuration.
 type Config struct {
-	Port              int              // listen port (default 8088)
-	Username          string           // admin user (default = onvif user)
-	Password          string           // admin pass (default = onvif pass)
-	AllowedOrigins    []string         // CORS allowed origins (default ["*"])
-	ConfigPath        string           // path to config.yaml (used by PUT /api/config)
+	Port              int                   // listen port (default 8088)
+	Username          string                // admin user (default = onvif user)
+	Password          string                // admin pass (default = onvif pass)
+	AllowedOrigins    []string              // CORS allowed origins (default ["*"])
+	ConfigPath        string                // path to config.yaml (used by PUT /api/config)
 	OnvifConfig       config.ConfigProvider // read-only onvif/rtsp config
 	GB28181Config     *config.GB28181Config // GB28181 configuration
 	Params            *camera.ParamManager  // imaging parameter manager
 	AUHub             *h264.AUHub           // H.264 access-unit hub
+	AI                *ai.Service           // AI detection service (nil = disabled/unavailable)
 	Version           string                // build version from ldflags
 	Logger            *log.Logger           // nil -> log.Default()
 	ReadHeaderTimeout time.Duration         // http.Server.ReadHeaderTimeout (0 = default 5s)
@@ -41,6 +45,7 @@ type Config struct {
 	RTSPStatus        func() bool           // returns RTSP server status (nil = unavailable)
 	FrameRate         func() float64        // returns current fps (nil = unavailable)
 	Snapshot          http.Handler          // GET /snapshot handler (nil = disabled)
+	Metrics           http.Handler          // GET /metrics handler (nil = disabled; SPEC §3.2)
 }
 
 // Server is the web UI HTTP server.
@@ -58,6 +63,11 @@ type Server struct {
 	sessions       *SessionStore
 	allowedOrigins []string
 	startTime      time.Time
+	// Process restart for PUT /api/config and POST /api/system/restart
+	// (SPEC §5.1). Injectable so tests can observe instead of dying.
+	selfRestart func()
+	// Observability state (SPEC §3.2).
+	observe *Observe
 }
 
 // New creates a new web server. An empty password means first-boot state
@@ -82,14 +92,30 @@ func New(cfg Config) *Server {
 		origins = []string{"*"}
 	}
 
+	// Sessions persist next to the config file so the deliberate
+	// self-restarts (config save, flips, /api/system/restart) keep
+	// browsers signed in (SPEC 附录A #10). Best effort — a load failure
+	// falls back to an in-memory store.
+	sessions := NewSessionStore()
+	if cfg.ConfigPath != "" {
+		sessions = NewSessionStoreAt(filepath.Join(filepath.Dir(cfg.ConfigPath), "web-sessions.json"))
+	}
+
 	return &Server{
-		cfg:             cfg,
-		logger:          logger,
-		username:        username,
-		password:        password,
-		sessions:        NewSessionStore(),
-		allowedOrigins:  origins,
-		loginLimiter:    &loginRateLimiter{attempts: make(map[string]*rateLimitEntry)},
+		cfg:            cfg,
+		observe:        NewObserve(),
+		logger:         logger,
+		username:       username,
+		password:       password,
+		sessions:       sessions,
+		allowedOrigins: origins,
+		loginLimiter:   &loginRateLimiter{attempts: make(map[string]*rateLimitEntry)},
+		selfRestart: func() {
+			go func() {
+				<-time.After(500 * time.Millisecond)
+				_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
+			}()
+		},
 	}
 }
 
@@ -112,6 +138,17 @@ func (s *Server) Start(ctx context.Context) error {
 				"value":     value,
 			})
 		})
+	}
+
+	// AI detections → SSE ai_detection events (SPEC §6).
+	if s.cfg.AI != nil && s.cfg.AI.Active() {
+		events := s.cfg.AI.Events()
+		go func() {
+			for evt := range events {
+				s.hub.broadcast("ai_detection", evt)
+			}
+		}()
+		s.logger.Printf("web: ai detection events enabled (model: %s)", s.cfg.AI.ModelName())
 	}
 
 	s.startTime = time.Now()
@@ -142,7 +179,7 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	s.server = &http.Server{
 		Addr:              addr,
-		Handler:           s.corsMiddleware(securityHeaders(s.mux)),
+		Handler:           s.corsMiddleware(securityHeaders(s.observeMiddleware(s.mux))),
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
 		WriteTimeout:      writeTimeout,
@@ -202,16 +239,27 @@ func (s *Server) registerRoutes() {
 	m.HandleFunc("GET /api/cameras/{id}/stream.mse", s.authRequired(s.handleStreamMSEPath))
 	m.HandleFunc("GET /api/config", s.authRequired(s.handleGetConfig))
 	m.HandleFunc("PUT /api/config", s.authRequired(s.handlePutConfig))
+	m.HandleFunc("POST /api/system/restart", s.authRequired(s.handleSystemRestart))
 
 	// Imaging extension (SPEC §4.5).
 	m.HandleFunc("GET /api/cameras/{id}/imaging/params", s.authRequired(s.handleGetCameraParams))
 	m.HandleFunc("GET /api/cameras/{id}/imaging/options", s.authRequired(s.handleGetCameraOptions))
 	m.HandleFunc("POST /api/cameras/{id}/imaging/param", s.authRequired(s.handlePostCameraParam))
 
+	// AI detections (SPEC v1 §4.6).
+	m.HandleFunc("GET /api/detections", s.authRequired(s.handleDetections))
+
 	// SSE events (SPEC §6).
 	m.HandleFunc("GET /api/events", s.authRequired(s.handleEvents))
+	// Observability (SPEC §3.2)
+	m.HandleFunc("GET /api/metrics/summary", s.authRequired(s.handleMetricsSummary))
+	m.HandleFunc("GET /api/logs", s.authRequired(s.handleLogs))
+	m.HandleFunc("GET /api/requests", s.authRequired(s.handleRequests))
 
 	// Legacy snapshot for NVRs — byte-stable, deliberately open (dialect A2).
+	if s.cfg.Metrics != nil {
+		m.Handle("GET /metrics", s.cfg.Metrics)
+	}
 	if s.cfg.Snapshot != nil {
 		m.HandleFunc("GET /snapshot", s.cfg.Snapshot.ServeHTTP)
 	}
@@ -426,3 +474,6 @@ func coerceFloat64(v interface{}) interface{} {
 	return f
 }
 
+// Observe exposes the shared observability state (SPEC §3.2) so the
+// process-wide sampler and log tee can be wired from main.
+func (s *Server) Observe() *Observe { return s.observe }

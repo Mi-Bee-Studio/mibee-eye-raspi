@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -279,6 +280,12 @@ func TestStatusAndCapabilitiesShape(t *testing.T) {
 	if caps["mjpeg"] != false {
 		t.Fatal("Go dialect: no MJPEG")
 	}
+	// The frontend keys the save→restart UX on this flag (SPEC §3.1):
+	// saving restart-sections self-restarts the service, so the UI waits
+	// for recovery instead of offering a manual restart entry.
+	if ca, ok := caps["config_apply"].(map[string]interface{}); !ok || ca["auto"] != true {
+		t.Fatalf("config_apply.auto must be true on the Go dialect, got %v", caps["config_apply"])
+	}
 	if caps["mse"] != false { // no AUHub wired here
 		t.Fatal("mse follows AUHub availability")
 	}
@@ -391,5 +398,40 @@ func TestFmp4Segments(t *testing.T) {
 		if !bytes.Contains(seg, []byte(box)) {
 			t.Fatalf("segment missing %s", box)
 		}
+	}
+}
+
+// ── system restart (SPEC §5.1) ────────────────────────────────────────
+
+// POST /api/system/restart responds immediately and fires the injected
+// self-restart action (the real one SIGTERMs the process; systemd brings it
+// back). Capabilities must advertise the restart extension.
+func TestSystemRestartEndpoint(t *testing.T) {
+	s := New(Config{Username: "admin", Password: "spec-pass-1"})
+	var fired atomic.Bool
+	s.selfRestart = func() { fired.Store(true) }
+
+	cookie, csrf := specLogin(t, s)
+	rec := doReq(t, s, http.MethodPost, "/api/system/restart", "", authHdr(cookie, csrf))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("restart failed: %d %s", rec.Code, rec.Body.String())
+	}
+	out := decode(t, rec)
+	data, ok := out["data"].(map[string]interface{})
+	if !ok || data["status"] != "restarting" {
+		t.Fatalf("unexpected body: %v", out)
+	}
+	if !fired.Load() {
+		t.Fatal("self-restart action must fire")
+	}
+
+	// Capability negotiation drives the UI's restart button.
+	rec = doReq(t, s, http.MethodGet, "/api/capabilities", "", authHdr(cookie, csrf))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("capabilities failed: %d", rec.Code)
+	}
+	caps := decode(t, rec)["data"].(map[string]interface{})
+	if caps["restart"] != true {
+		t.Fatalf("capabilities.restart must be true, got %v", caps["restart"])
 	}
 }

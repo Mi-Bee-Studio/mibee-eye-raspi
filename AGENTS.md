@@ -18,11 +18,33 @@ Go 1.26+ ONVIF camera service for single-board computers. Primary purpose: **tes
 ## Build & Deploy
 
 ```bash
-# Cross-compile (from workstation)
+# Cross-compile WITHOUT AI detection (pure Go, no CGO — any host)
 GOOS=linux GOARCH=arm64 go build -o build/mibee-eye ./cmd/server
-# Test
+
+# Cross-compile WITH AI detection (SPEC §4.6; the deploy variant)
+# CGO is required by onnxruntime_go (dlopen). Do NOT use `zig cc` here —
+# zig-built CGO binaries crash with SIGILL inside dlopen on the Pi
+# (verified 2026-09-04). Use the Arm GNU cross toolchain instead:
+CGO_ENABLED=1 \
+CC=$HOME/tools/arm-gnu-toolchain-13.2.Rel1-x86_64-aarch64-none-linux-gnu/bin/aarch64-none-linux-gnu-gcc \
+GOOS=linux GOARCH=arm64 go build -tags ai -o build/rpi3b-cam-arm64 ./cmd/server
+
+# NOTE: onnxruntime_go is pinned to v1.31.0 (requests ORT API 26). The
+# deployed libonnxruntime.so is 1.28.0 (supports API ≤28); binding
+# versions ≥v1.33 request API 29 and fail with "Error setting ORT API
+# base: 2" — bump the pin only together with the runtime library.
+
+# Test (default build) / with the AI tag
 go test ./...
+go vet -tags ai ./...
 ```
+
+**AI runtime prerequisites on the device** (fail-open when missing): the
+`ffmpeg` binary (Debian package, keyframe-only decode), the NanoDet model
+at `[ai] model_path`, and `libonnxruntime.so` at `[ai] onnx_lib_path`
+(aarch64 build; see `~/mibee-eye-raspi-rs/tmp/ort/`). Enable via the `[ai]`
+config section. Detection cadence follows `camera.idr_period` (15 = 1s
+keyframes at 15fps).
 
 **Deploy gotchas** (learned the hard way):
 

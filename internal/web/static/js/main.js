@@ -2,18 +2,26 @@
 
 import { api, onSessionExpired, refreshCapabilities } from './api.js';
 import { store, setLang } from './store.js';
-import { $, toast } from './ui.js';
+import { $, toast, confirmDlg } from './ui.js';
 import { t, applyLang } from './i18n.js';
+import { icon, initIcons } from './icons.js';
 import { initTheme } from './theme.js';
 import { AuthState, detectAuthState, setAuthMode, initAuth, handleLogout } from './auth.js';
 import { connectEvents, disconnectEvents } from './sse.js';
 import { initLive, startLive, stopLive, refreshCameraSelect, renderDetections } from './live.js';
 import { initPtz, fetchPtz, updatePtzVisibility, handlePtzEvent } from './ptz.js';
 import { initImaging, handleParamChanged } from './imaging.js';
-import { refreshCameras, renderCameras, initCameras } from './cameras.js';
+import { refreshCameras, renderCameras, initCameras, stopCameras, announceRecording } from './cameras.js';
 import { loadConfig, initSettings } from './settings.js';
 import { checkApi, refreshStatus, initStatus, startStatusPolling } from './status.js';
 import { renderDevices, initDevices } from './devices.js';
+
+const VIEWS = ['preview', 'cameras', 'settings', 'status', 'devices'];
+
+function currentView() {
+  const name = (location.hash || '').replace(/^#\/?/, '');
+  return VIEWS.includes(name) && $('view-' + name) ? name : 'preview';
+}
 
 export function showView(name) {
   if (name === 'login') { teardownApp(); return; }
@@ -24,10 +32,13 @@ export function showView(name) {
     tab.classList.toggle('active', tab.dataset.view === name);
   });
   $('app').classList.remove('hidden');
+  // Keep the view across reloads (F5 lands back on the same view, not live).
+  history.replaceState(null, '', '#' + name);
 
   if (name === 'preview') startLive();
   else stopLive();
   if (name === 'cameras') { refreshCameras().then(renderCameras); }
+  else stopCameras();
   if (name === 'settings') loadConfig();
   if (name === 'status') { checkApi(); refreshStatus(); }
   if (name === 'devices') renderDevices();
@@ -35,6 +46,7 @@ export function showView(name) {
 
 function teardownApp() {
   stopLive();
+  stopCameras();
   disconnectEvents();
   document.querySelectorAll('.view').forEach((v) => v.classList.remove('active'));
   $('view-login').classList.add('active');
@@ -59,7 +71,9 @@ async function enterApp() {
   connectEvents({
     ai_detection: (p) => renderDetections(p.detections || []),
     param_changed: handleParamChanged,
-    recording: (p) => toast(t(p.active ? 'recordingStarted' : 'recordingStopped'), 'info'),
+    recording: (p) => {
+      if (p) announceRecording(!!p.active, 'info');
+    },
     ptz_status: handlePtzEvent,
     camera_added: () => { refreshCameras().then(() => { renderCameras(); refreshCameraSelect(); }); },
     camera_offlined: () => { refreshCameras().then(() => { renderCameras(); refreshCameraSelect(); }); },
@@ -67,18 +81,24 @@ async function enterApp() {
   });
 
   startStatusPolling();
-  showView('preview');
+  // Restore the last view after a reload; default to live view.
+  showView(currentView());
 }
 
 function initNav() {
   if (initNav._done) return;
   initNav._done = true;
   document.querySelectorAll('.nav-tab').forEach((btn) => {
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', async () => {
       const target = btn.dataset.view;
       if (!target || target === 'login') return;
       if (store.configDirty && target !== 'settings') {
-        if (!window.confirm(t('unsavedConfirm'))) return;
+        const ok = await confirmDlg({
+          message: t('unsavedConfirm'),
+          okText: t('confirm'),
+          cancelText: t('cancel'),
+        });
+        if (!ok) return;
         store.configDirty = false;
       }
       showView(target);
@@ -87,6 +107,7 @@ function initNav() {
 }
 
 function initShell() {
+  initIcons();
   applyLang();
   initTheme();
 
@@ -104,6 +125,8 @@ function initShell() {
     if (!input) return;
     const show = input.type === 'password';
     input.type = show ? 'text' : 'password';
+    btn.innerHTML = icon(show ? 'eye-off' : 'eye', 18);
+    btn.classList.toggle('revealed', show);
     btn.setAttribute('aria-label', show ? t('hidePassword') : t('showPassword'));
   });
 
@@ -136,10 +159,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   initShell();
   initAuth(enterApp);
   document.querySelectorAll('.logout-btn').forEach((b) => {
-    b.addEventListener('click', () => handleLogout(async () => {
-      setAuthMode(AuthState.LOGIN);
-      showView('login');
-    }));
+    b.addEventListener('click', () => {
+      // Drop tile streams BEFORE the logout POST — each hidden MJPEG <img>
+      // pins one of the browser's 6 per-origin connections, and enough of
+      // them starve the POST into never landing (logout looks dead).
+      stopCameras();
+      handleLogout(async () => {
+        setAuthMode(AuthState.LOGIN);
+        showView('login');
+      });
+    });
   });
 
   const state = await detectAuthState();
@@ -149,4 +178,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     setAuthMode(state);
     $('view-login').classList.add('active');
   }
+});
+
+// Back/forward and manual hash edits switch views without a reload.
+window.addEventListener('hashchange', () => {
+  if (!$('app').classList.contains('hidden')) showView(currentView());
 });

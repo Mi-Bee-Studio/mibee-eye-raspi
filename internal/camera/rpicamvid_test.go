@@ -198,3 +198,43 @@ func TestGroupAccessUnits(t *testing.T) {
 		t.Errorf("AU[5] = %+v, want single slice", aus[5])
 	}
 }
+
+func TestBuildArgsFlips(t *testing.T) {
+	// Device-level flips from config must reach the rpicam-vid command
+	// line — they are baked into the encoded stream (libcamera transform).
+	base := func() *RPiCamVidCamera {
+		c := NewRPiCamVidCamera(
+			WithVidBinPath("rpicam-vid"),
+			WithVidParams(DefaultParams()),
+			WithVidInfo(CameraInfo{}),
+		)
+		return c
+	}
+
+	off := base()
+	got := off.buildArgs()
+	for _, a := range got {
+		if a == "--hflip" || a == "--vflip" {
+			t.Errorf("unexpected flip flag %q with flips disabled: %v", a, got)
+		}
+	}
+
+	hv := base()
+	hv.mu.Lock()
+	hv.params.HFlip = true
+	hv.params.VFlip = true
+	hv.mu.Unlock()
+	got = hv.buildArgs()
+	hasH, hasV := false, false
+	for _, a := range got {
+		if a == "--hflip" {
+			hasH = true
+		}
+		if a == "--vflip" {
+			hasV = true
+		}
+	}
+	if !hasH || !hasV {
+		t.Errorf("expected --hflip and --vflip in args, got %v", got)
+	}
+}

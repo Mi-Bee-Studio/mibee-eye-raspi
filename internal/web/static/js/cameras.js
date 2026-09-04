@@ -3,8 +3,9 @@
 
 import { api } from './api.js';
 import { store, setCameraId, hasCap } from './store.js';
-import { $, el, esc, toast } from './ui.js';
+import { $, el, esc, toast, confirmDlg } from './ui.js';
 import { t } from './i18n.js';
+import { icon } from './icons.js';
 import { showView } from './main.js';
 
 const tileTimers = new Map();
@@ -23,12 +24,14 @@ export async function refreshCameras() {
 export async function renderCameras() {
   const grid = $('cameras-grid');
   if (!grid) return;
-  for (const timer of tileTimers.values()) clearInterval(timer);
-  tileTimers.clear();
+  stopCameras();
   grid.innerHTML = '';
 
   if (store.cameras.length === 0) {
-    grid.appendChild(el('div', { className: 'empty-state', textContent: t('noCameras') }));
+    grid.appendChild(el('div', {
+      className: 'empty-state',
+      html: icon('video', 34) + '<span>' + esc(t('noCameras')) + '</span>',
+    }));
     return;
   }
 
@@ -42,40 +45,59 @@ function renderTile(cam) {
   const statusLabel = t(cam.status === 'offline' ? 'statusOffline'
     : hasCap('camera_control') && cam.status === 'idle' ? 'statusIdle'
     : hasCap('camera_control') ? 'statusRunning' : 'statusOnline');
+  const badgeCls = cam.status === 'offline' ? 'badge-offline'
+    : cam.status === 'idle' ? 'badge-idle' : 'badge-online';
 
   const thumb = el('img', {
     className: 'tile-thumb', alt: cam.name || cam.id,
     src: running ? '' : '',
   });
+  // Broken thumb frames (e.g. no encoder yet) just hide — the striped
+  // tile background doubles as the "no signal" placeholder.
+  thumb.addEventListener('error', () => thumb.classList.add('hidden'));
   if (running) attachThumb(thumb, cam.id);
 
-  const actions = [el('button', {
-    className: 'btn-small', textContent: t('openLive'),
-    onclick: () => { setCameraId(cam.id); showView('preview'); },
-  })];
+  const iconBtn = (name, label, onclick, extra = '') => el('button', {
+    className: 'btn-small ' + extra,
+    html: icon(name, 14) + '<span>' + esc(label) + '</span>',
+    onclick,
+  });
+
+  const actions = [iconBtn('live', t('openLive'), () => { setCameraId(cam.id); showView('preview'); })];
   if (hasCap('camera_control')) {
-    actions.push(el('button', {
-      className: 'btn-small', textContent: running ? t('stopStream') : t('startStream'),
-      onclick: () => toggleStream(cam),
-    }));
+    actions.push(iconBtn(running ? 'stop' : 'play', running ? t('stopStream') : t('startStream'), () => toggleStream(cam)));
   }
   if (hasCap('recording')) {
-    actions.push(el('button', {
-      className: 'btn-small', textContent: t('recordingStart'),
-      onclick: () => toggleRecording(cam),
-    }));
+    actions.push(iconBtn('record', t('recordingStart'), () => toggleRecording(cam)));
   }
   if (hasCap('camera_management')) {
+    // Device-level flips: persisted in the camera config, baked into the
+    // encoded stream on (re)start — every viewer sees them.
+    const cfg = cam.config || {};
     actions.push(el('button', {
-      className: 'btn-small btn-danger', textContent: t('deleteCamera'),
-      onclick: () => deleteCamera(cam),
+      className: 'btn-small btn-flip',
+      'aria-pressed': String(!!cfg.hflip),
+      title: t('flipH'), 'aria-label': t('flipH'),
+      html: icon('flip-h', 14),
+      onclick: () => toggleDeviceFlip(cam, 'hflip'),
     }));
+    actions.push(el('button', {
+      className: 'btn-small btn-flip',
+      'aria-pressed': String(!!cfg.vflip),
+      title: t('flipV'), 'aria-label': t('flipV'),
+      html: icon('flip-v', 14),
+      onclick: () => toggleDeviceFlip(cam, 'vflip'),
+    }));
+    actions.push(iconBtn('trash', t('deleteCamera'), () => deleteCamera(cam), 'btn-danger'));
   }
 
   return el('div', { className: 'tile' + (running ? '' : ' offline'), dataset: { camera: cam.id } }, [
     el('div', { className: 'tile-media' }, [
       thumb,
-      el('span', { className: 'tile-badge ' + (running ? 'badge-online' : 'badge-offline'), textContent: statusLabel }),
+      el('span', {
+        className: 'tile-badge ' + badgeCls,
+        html: '<span class="badge-dot"></span>' + esc(statusLabel),
+      }),
     ]),
     el('div', { className: 'tile-body' }, [
       el('div', { className: 'tile-title', textContent: cam.name || cam.id }),
@@ -83,6 +105,20 @@ function renderTile(cam) {
     ]),
     el('div', { className: 'tile-actions' }, actions),
   ]);
+}
+
+/// Drop every tile's stream (MJPEG <img> or polling timer). A hidden view's
+/// <img> keeps loading its multipart stream forever — each tile pins a
+/// browser connection slot, and enough of them starve every other request
+/// on the device (logout, config save, even navigation).
+export function stopCameras() {
+  for (const timer of tileTimers.values()) clearInterval(timer);
+  tileTimers.clear();
+  document.querySelectorAll('#cameras-grid .tile-thumb').forEach((img) => {
+    img.onload = img.onerror = null;
+    img.removeAttribute('src');
+    img.classList.add('hidden');
+  });
 }
 
 function tileMeta(cam) {
@@ -116,16 +152,62 @@ async function toggleStream(cam) {
   }
 }
 
+// Recording toasts come from two sources racing each other: the POST
+// response and the SSE echo (which the device broadcasts before the fetch
+// even resolves). Funnel both through announceRecording and drop any
+// same-message repeat within a short window, regardless of arrival order.
+let lastRecordingAnnounce = null;
+
+export function announceRecording(active, type) {
+  const msg = t(active ? 'recordingStarted' : 'recordingStopped');
+  const now = Date.now();
+  if (lastRecordingAnnounce && lastRecordingAnnounce.msg === msg
+    && now - lastRecordingAnnounce.at < 2500) {
+    return;
+  }
+  lastRecordingAnnounce = { msg, at: now };
+  toast(msg, type);
+}
+
 async function toggleRecording(cam) {
   const r = await api.get(`/api/cameras/${cam.id}/recording`);
   const active = r.ok && r.data && r.data.active;
   const r2 = await api.post(`/api/cameras/${cam.id}/recording`, { active: !active });
-  if (r2.ok) toast(t(active ? 'recordingStopped' : 'recordingStarted'), 'success');
-  else toast(r2.message || t('fetchError'), 'error');
+  if (r2.ok) {
+    announceRecording(!active, 'success');
+  } else {
+    toast(r2.message || t('fetchError'), 'error');
+  }
+}
+
+/// Toggle a device-level flip axis in the camera config. Flips are applied
+/// when the stream (re)starts, so cycle stop→start when the camera is live.
+async function toggleDeviceFlip(cam, axis) {
+  const cfg = { ...(cam.config || {}) };
+  cfg[axis] = !cfg[axis];
+  const r = await api.put(`/api/cameras/${cam.id}`, { config: cfg });
+  if (!r.ok) {
+    toast(r.message || t('fetchError'), 'error');
+    return;
+  }
+  const wasActive = isActive(cam);
+  if (wasActive && hasCap('camera_control')) {
+    await api.post(`/api/cameras/${cam.id}/stop`);
+    await api.post(`/api/cameras/${cam.id}/start`);
+  }
+  await refreshCameras();
+  renderCameras();
+  toast(t('flipApplied'), 'success');
 }
 
 async function deleteCamera(cam) {
-  if (!window.confirm(t('deleteConfirm', { name: cam.name || cam.id }))) return;
+  const ok = await confirmDlg({
+    message: t('deleteConfirm', { name: cam.name || cam.id }),
+    okText: t('deleteCamera'),
+    cancelText: t('cancel'),
+    danger: true,
+  });
+  if (!ok) return;
   const r = await api.del(`/api/cameras/${cam.id}`);
   if (r.ok) {
     await refreshCameras();
@@ -138,6 +220,8 @@ async function deleteCamera(cam) {
 export function initCameras() {
   const view = $('view-cameras');
   if (view) view.classList.toggle('hidden-cap', !hasCap('multi_camera'));
-  const tab = document.querySelector('.nav-tab[data-view="cameras"]');
-  if (tab) tab.classList.toggle('hidden', !hasCap('multi_camera'));
+  // Both the top bar and the mobile tab bar carry this tab.
+  document.querySelectorAll('.nav-tab[data-view="cameras"]').forEach((tab) => {
+    tab.classList.toggle('hidden', !hasCap('multi_camera'));
+  });
 }

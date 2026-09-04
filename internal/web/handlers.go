@@ -8,8 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"syscall"
-	"time"
+	"strings"
 
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/camera"
 
@@ -32,20 +31,12 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		"fps":     oc.CameraFPS(),
 		"codec":   oc.CameraCodec(),
 		"bitrate": oc.CameraBitrate(),
-	}
-
-	// Overlay live params from ParamManager when available.
-	if s.cfg.Params != nil {
-		for name := range camera.ParamRanges {
-			if val, err := s.cfg.Params.Get(name); err == nil {
-				cameraSection[name] = val
-			}
-		}
-		for name := range camera.ParamEnums {
-			if val, err := s.cfg.Params.Get(name); err == nil {
-				cameraSection[name] = val
-			}
-		}
+		// Persistent device-level flips (YAML camera.hflip/vflip). Live
+		// PascalCase params are deliberately NOT overlaid here — the editor
+		// round-trip would write them back as duplicate keys; the imaging
+		// endpoints (SPEC §4.5) are their API surface.
+		"hflip": oc.CameraHFlip(),
+		"vflip": oc.CameraVFlip(),
 	}
 
 	webUser, webPass := s.currentCredentials()
@@ -151,12 +142,17 @@ func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.logger.Printf("web: config updated, restarting in 500ms")
-	go func() {
-		<-time.After(500 * time.Millisecond)
-		_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
-	}()
+	s.selfRestart()
 
 	writeOK(w, http.StatusOK, map[string]interface{}{"applied": "restart"})
+}
+
+// handleSystemRestart implements POST /api/system/restart (SPEC §5.1): apply
+// all saved restart-semantics config by restarting the service process.
+func (s *Server) handleSystemRestart(w http.ResponseWriter, r *http.Request) {
+	s.logger.Printf("web: restart requested via /api/system/restart")
+	s.selfRestart()
+	writeOK(w, http.StatusOK, map[string]interface{}{"status": "restarting"})
 }
 
 // restoreMaskedSecrets replaces "****" password values in the update with
@@ -246,8 +242,11 @@ func (s *Server) handleGetCameraParams(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, http.StatusOK, result)
 }
 
-// handlePostCameraParam sets a single imaging parameter (immediate effect,
-// broadcasts param_changed via the SSE hub).
+// handlePostCameraParam sets a single imaging parameter (SPEC §4.5).
+// HFlip/VFlip are the exception to "immediate effect": rpicam-vid has no
+// runtime flip channel, so they are persisted into the YAML camera section
+// and the service restarts to bake them into the pipeline
+// (附录A #9; response carries applied:"restart").
 func (s *Server) handlePostCameraParam(w http.ResponseWriter, r *http.Request) {
 	if !s.requireCamera0(w, r) {
 		return
@@ -271,12 +270,89 @@ func (s *Server) handlePostCameraParam(w http.ResponseWriter, r *http.Request) {
 	}
 
 	value := coerceFloat64(req.Value)
+
+	// Flip no-op short-circuit (附录A #9): a flip that already matches the
+	// live pipeline has nothing to bake in — skip the YAML write and the
+	// restart. resetDefaults POSTs both flips back-to-back with default
+	// values; unchanged values must not stack restarts against the
+	// systemd StartLimit.
+	if (req.Name == "HFlip" || req.Name == "VFlip") && s.flipUnchanged(req.Name, value) {
+		s.logger.Printf("web: camera param %s already %v, no restart needed", req.Name, value)
+		writeOK(w, http.StatusOK, map[string]interface{}{"name": req.Name, "value": value})
+		return
+	}
+
 	if err := s.cfg.Params.Set(req.Name, value); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.logger.Printf("web: camera param %s set to %v", req.Name, value)
-	writeOK(w, http.StatusOK, map[string]interface{}{"name": req.Name, "value": value})
+
+	resp := map[string]interface{}{"name": req.Name, "value": value}
+	if req.Name == "HFlip" || req.Name == "VFlip" {
+		if err := s.persistCameraFlip(strings.ToLower(req.Name), value); err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("persist flip: %v", err))
+			return
+		}
+		s.logger.Printf("web: camera param %s set to %v, restarting to apply", req.Name, value)
+		s.selfRestart()
+		resp["applied"] = "restart"
+	} else {
+		s.logger.Printf("web: camera param %s set to %v", req.Name, value)
+	}
+	writeOK(w, http.StatusOK, resp)
+}
+
+// flipUnchanged reports whether the live pipeline already sits at the posted
+// flip value. An unreadable or non-boolean current value counts as changed so
+// the safe path (persist + restart) still runs.
+func (s *Server) flipUnchanged(name string, value interface{}) bool {
+	cur, err := s.cfg.Params.Get(name)
+	if err != nil {
+		return false
+	}
+	curBool, okCur := flipAsBool(cur)
+	valBool, okVal := flipAsBool(value)
+	return okCur && okVal && curBool == valBool
+}
+
+// flipAsBool normalizes bool / 0|1 numeric flip values for comparison.
+func flipAsBool(v interface{}) (bool, bool) {
+	switch b := v.(type) {
+	case bool:
+		return b, true
+	case int:
+		return b != 0, true
+	case float64:
+		return b != 0, true
+	}
+	return false, false
+}
+
+// persistCameraFlip merges hflip/vflip into the YAML camera section and
+// atomically rewrites the file (same read-merge-write as handlePutConfig).
+func (s *Server) persistCameraFlip(key string, value interface{}) error {
+	if s.cfg.ConfigPath == "" {
+		return fmt.Errorf("config path not configured")
+	}
+	data, err := os.ReadFile(s.cfg.ConfigPath)
+	if err != nil {
+		return fmt.Errorf("failed to read config: %w", err)
+	}
+	var cfg map[string]interface{}
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return fmt.Errorf("failed to parse config: %w", err)
+	}
+	camSec, ok := cfg["camera"].(map[string]interface{})
+	if !ok {
+		camSec = map[string]interface{}{}
+		cfg["camera"] = camSec
+	}
+	camSec[key] = value
+	out, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config: %w", err)
+	}
+	return atomicWrite(s.cfg.ConfigPath, out)
 }
 
 // handleGetCameraOptions returns imaging parameter ranges and enums.

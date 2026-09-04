@@ -2,11 +2,13 @@
 // Device schemas differ — the editor renders whatever document it receives.
 
 import { api, refreshCapabilities } from './api.js';
-import { store } from './store.js';
-import { $, toast } from './ui.js';
+import { store, hasCap } from './store.js';
+import { $, toast, setBtnLoading, confirmDlg } from './ui.js';
 import { t, cfgLabel } from './i18n.js';
+import { icon } from './icons.js';
 import { applyTransform } from './live.js';
 import { initImaging } from './imaging.js';
+import { beginDeviceRestart } from './restart.js';
 
 const ENUMS = {
   'camera.mode': ['mtxrpicam', 'rtsp'],
@@ -27,6 +29,29 @@ const PASSWORD_FIELDS = new Set(['rtsp.password', 'onvif.password', 'gb28181.pas
 const GB28181_ID_FIELDS = new Set(['gb28181.device_id', 'gb28181.channel_id']);
 
 let saveInProgress = false;
+/// Config paths whose document value is a string. collectConfig must send
+/// them back verbatim: numeric-looking strings (20-digit GB/T 28181 SIP IDs,
+/// phone numbers) would otherwise be converted to floats — losing precision
+/// above 2^53 and getting the PUT rejected by devices (`expected a string`).
+const stringFields = new Set();
+/// Config paths whose document value is an array (e.g. cpu_cores). Rendered
+/// read-only and omitted from the PUT: deepMerge keeps the stored value, and
+/// sending an index-keyed object in its place would be rejected
+/// (`expected a sequence`).
+const arrayFields = new Set();
+/// Top-level config sections the user has edited since load/save — drives
+/// the post-save restart banner (SPEC §5: restart sections need a service
+/// restart to apply; the UI surfaces a one-click restart when supported).
+const dirtySections = new Set();
+
+/// Apply semantics of a config section from capabilities.config_apply
+/// (SPEC §3.1): sections override the default; nested paths fall back to
+/// their top-level section, then the device default.
+function sectionApply(path) {
+  const ca = (store.caps && store.caps.config_apply) || {};
+  const s = ca.sections || {};
+  return s[path] || s[path.split('.')[0]] || ca.default || 'immediate';
+}
 
 export async function loadConfig() {
   const form = $('config-form'), loading = $('config-loading');
@@ -37,6 +62,9 @@ export async function loadConfig() {
   const r = await api.get('/api/config');
   if (r.ok) {
     store.config = r.data;
+    stringFields.clear();
+    arrayFields.clear();
+    dirtySections.clear();
     buildForm(store.config, form, '');
     form.classList.remove('hidden');
   } else {
@@ -46,26 +74,46 @@ export async function loadConfig() {
   renderApplyBanner();
 }
 
-function renderApplyBanner() {
+/// Banner under the settings header: shows apply semantics, and — when the
+/// device supports it (capabilities.restart, SPEC §5.1) — a one-click
+/// restart button. `changed` lists restart sections edited in this save
+/// cycle, upgrading the copy from generic to actionable.
+function renderApplyBanner(changed = null) {
   const banner = $('config-apply-banner');
   if (!banner) return;
   const apply = (store.caps && store.caps.config_apply) || {};
   const restartish = apply.default === 'restart' ||
     Object.values(apply.sections || {}).includes('restart');
   banner.classList.toggle('hidden', !restartish);
+  if (!restartish) return;
+  const btn = $('btn-restart-device');
+  if (btn) btn.classList.toggle('hidden', !hasCap('restart'));
+  const label = banner.querySelector('[data-i18n=applyRestart]');
+  if (label) {
+    label.textContent = changed && changed.length
+      ? t('savedNeedRestart', { sections: changed.join(', ') })
+      : t('applyRestart');
+  }
 }
 
 function buildForm(obj, parent, prefix) {
   parent.innerHTML = '';
   const leaf = [], nest = [];
   for (const [k, v] of Object.entries(obj)) {
-    (v && typeof v === 'object' ? nest : leaf).push([k, v]);
+    (v && typeof v === 'object' && !Array.isArray(v) ? nest : leaf).push([k, v]);
   }
   for (const [key, val] of leaf) {
     const p = prefix ? prefix + '.' + key : key;
     const row = document.createElement('div');
     row.className = 'config-field';
     row.dataset.cfg = p;
+    if (Array.isArray(val)) {
+      arrayFields.add(p);
+      row.innerHTML = '<label for="cf-' + p + '">' + cfgLabel(p, key) + '</label>'
+        + '<input type="text" id="cf-' + p + '" value="' + esc(JSON.stringify(val)) + '" data-cfg="' + p + '" disabled title="列表字段暂不支持在线编辑">';
+      parent.appendChild(row);
+      continue;
+    }
     const typ = typeof val;
     if (typ === 'boolean') {
       row.innerHTML = '<div class="field-row"><input type="checkbox" id="cf-' + p + '" ' + (val ? 'checked' : '') + ' data-cfg="' + p + '"><label for="cf-' + p + '">' + cfgLabel(p, key) + '</label></div>';
@@ -74,11 +122,12 @@ function buildForm(obj, parent, prefix) {
       const attrs = (c.min !== undefined ? ' min="' + c.min + '"' : '') + (c.max !== undefined ? ' max="' + c.max + '"' : '');
       row.innerHTML = '<label for="cf-' + p + '">' + cfgLabel(p, key) + '</label><input type="number" id="cf-' + p + '" value="' + val + '" step="any"' + attrs + ' data-cfg="' + p + '">';
     } else {
+      stringFields.add(p);
       const en = ENUMS[p];
       if (en) {
-        row.innerHTML = '<label for="cf-' + p + '">' + key + '</label><select id="cf-' + p + '" data-cfg="' + p + '">' + en.map((o) => '<option ' + (o === val ? 'selected' : '') + '>' + o + '</option>').join('') + '</select>';
+        row.innerHTML = '<label for="cf-' + p + '">' + cfgLabel(p, key) + '</label><select id="cf-' + p + '" data-cfg="' + p + '">' + en.map((o) => '<option ' + (o === val ? 'selected' : '') + '>' + o + '</option>').join('') + '</select>';
       } else if (PASSWORD_FIELDS.has(p)) {
-        row.innerHTML = '<label for="cf-' + p + '">' + cfgLabel(p, key) + '</label><div class="password-wrap"><input type="password" id="cf-' + p + '" value="' + esc(String(val)) + '" data-cfg="' + p + '" autocomplete="new-password"><button type="button" class="password-toggle" data-target="cf-' + p + '" aria-label="' + t('showPassword') + '">\u{1F441}</button></div>';
+        row.innerHTML = '<label for="cf-' + p + '">' + cfgLabel(p, key) + '</label><div class="password-wrap"><input type="password" id="cf-' + p + '" value="' + esc(String(val)) + '" data-cfg="' + p + '" autocomplete="new-password"><button type="button" class="password-toggle" data-target="cf-' + p + '" aria-label="' + t('showPassword') + '">' + icon('eye', 18) + '</button></div>';
       } else {
         const idAttrs = GB28181_ID_FIELDS.has(p) ? ' maxlength="20" placeholder="' + t('gb28181.id20Placeholder') + '"' : '';
         row.innerHTML = '<label for="cf-' + p + '">' + cfgLabel(p, key) + '</label><input type="text" id="cf-' + p + '" value="' + esc(String(val)) + '"' + idAttrs + ' data-cfg="' + p + '">';
@@ -90,11 +139,14 @@ function buildForm(obj, parent, prefix) {
     const p = prefix ? prefix + '.' + key : key;
     const sec = document.createElement('div');
     sec.className = 'config-section';
+    const apply = sectionApply(p);
+    const badge = '<span class="section-apply-badge apply-' + apply + '">'
+      + t(apply === 'restart' ? 'applyRestartSec' : 'applyImmediateSec') + '</span>';
     const hdr = document.createElement('button');
     hdr.type = 'button';
     hdr.className = 'config-section-title';
     hdr.setAttribute('aria-expanded', 'true');
-    hdr.textContent = cfgLabel(p, key);
+    hdr.innerHTML = esc(cfgLabel(p, key)) + badge + '<span class="chev">' + icon('chevron-down', 15) + '</span>';
     hdr.addEventListener('click', () => {
       const collapsed = sec.classList.toggle('collapsed');
       hdr.setAttribute('aria-expanded', String(!collapsed));
@@ -139,13 +191,16 @@ function validateConfig() {
 function collectConfig() {
   const out = {};
   document.querySelectorAll('#config-form [data-cfg]').forEach((node) => {
-    const parts = node.getAttribute('data-cfg').split('.');
+    const p = node.getAttribute('data-cfg');
+    if (arrayFields.has(p)) return; // omitted → deepMerge keeps the stored array
+    const parts = p.split('.');
     let val;
     if (node.type === 'checkbox') val = node.checked;
     else if (node.type === 'number') {
       const n = parseFloat(node.value);
       val = (node.value === '' || isNaN(n)) ? null : n;
-    } else val = maybeNum(node.value);
+    } else if (stringFields.has(p)) val = node.value;
+    else val = maybeNum(node.value);
     let o = out;
     for (let i = 0; i < parts.length - 1; i++) {
       if (!o[parts[i]] || typeof o[parts[i]] !== 'object') o[parts[i]] = {};
@@ -161,12 +216,14 @@ function maybeNum(v) {
   return (v === '' || isNaN(n)) ? v : n;
 }
 
-function markDirty() {
-  if (!store.configDirty) {
-    store.configDirty = true;
-    updateSaveState();
+function markDirty(ev) {
+  store.configDirty = true;
+  const node = ev && ev.target;
+  if (node && node.dataset && node.dataset.cfg) {
+    dirtySections.add(node.dataset.cfg.split('.')[0]);
   }
-  validateConfig();
+  // Always re-evaluate: fixing an invalid field must re-enable Save.
+  updateSaveState();
 }
 
 function updateSaveState() {
@@ -188,24 +245,56 @@ export async function handleSave() {
   }
   saveInProgress = true;
   const btn = $('save-config');
-  btn.disabled = true;
-  btn.textContent = t('saving');
+  setBtnLoading(btn, true);
   const merged = deepMerge(store.config || {}, collectConfig());
   const r = await api.put('/api/config', merged);
   if (r.ok) {
     store.config = merged;
     store.configDirty = false;
+    // Go dialect (capabilities config_apply.auto): saving restart-sections
+    // already SIGTERMs the service — skip the post-save refreshes (they
+    // would race the dying process) and ride the shared restart flow.
+    if (r.data && r.data.applied === 'restart' && hasCap('restart')
+        && store.caps && store.caps.config_apply && store.caps.config_apply.auto) {
+      dirtySections.clear();
+      renderApplyBanner([]);
+      beginDeviceRestart();
+      return;
+    }
     toast(t('saved'), 'success');
     applyTransform();
     // Capabilities may have flipped (e.g. recording enabled) — refresh.
     await refreshCapabilities();
     initImaging();
+    // Point the user at the restart entry when edited sections need it.
+    const changedRestart = [...dirtySections].filter((s) => sectionApply(s) === 'restart');
+    renderApplyBanner(changedRestart);
+    dirtySections.clear();
   } else {
     toast(r.message || r.error || t('saveError'), 'error');
   }
   saveInProgress = false;
-  btn.textContent = t('save');
+  setBtnLoading(btn, false);
   updateSaveState();
+}
+
+/// One-click service restart (SPEC §5.1): confirm → POST → shared restart
+/// flow (restart.js): announce, poll the public /api/health until the
+/// service is back, reload once — signed in where the dialect persists
+/// sessions (Go), login form otherwise.
+async function restartDevice() {
+  const ok = await confirmDlg({
+    message: t('restartConfirm'),
+    okText: t('restartNow'),
+    cancelText: t('cancel'),
+  });
+  if (!ok) return;
+  const overlay = $('restart-overlay');
+  if (overlay) overlay.classList.remove('hidden');
+  try {
+    await api.post('/api/system/restart');
+  } catch (_) { /* connection resets as the process exits — expected */ }
+  beginDeviceRestart();
 }
 
 export function deepMerge(a, b) {
@@ -226,6 +315,8 @@ export function initSettings() {
   }
   const save = $('save-config');
   if (save) save.addEventListener('click', handleSave);
+  const restartBtn = $('btn-restart-device');
+  if (restartBtn) restartBtn.addEventListener('click', restartDevice);
   window.addEventListener('beforeunload', (e) => {
     if (store.configDirty) { e.preventDefault(); e.returnValue = ''; }
   });

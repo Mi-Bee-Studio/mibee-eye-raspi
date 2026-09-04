@@ -3,8 +3,9 @@
 
 import { api } from './api.js';
 import { cameraId, hasCap } from './store.js';
-import { $, el, toast } from './ui.js';
+import { $, el, toast, confirmDlg } from './ui.js';
 import { t } from './i18n.js';
+import { beginDeviceRestart, restartPending } from './restart.js';
 
 const SLIDERS = [
   { name: 'Brightness', min: -1, max: 1, step: 0.01 },
@@ -15,6 +16,36 @@ const SLIDERS = [
 const AWB_ENUMS = ['auto', 'incandescent', 'fluorescent', 'warm_fluorescent', 'daylight', 'cloudy', 'shade'];
 const EXPOSURE_ENUMS = ['normal', 'sports', 'night', 'backlight', 'spotlight', 'snow', 'beach', 'verylong', 'fixedfps', 'antishake', 'fireworks'];
 const postTimers = {};
+
+function postParam(name, value) {
+  clearTimeout(postTimers[name]);
+  postTimers[name] = setTimeout(async () => {
+    const r = await api.post(`/api/cameras/${cameraId()}/imaging/param`, { name, value });
+    if (!r.ok) { toast(t('paramError', { name }), 'error'); return; }
+    if (r.data && r.data.applied === 'restart') beginDeviceRestart();
+  }, 150);
+}
+
+async function resetDefaults() {
+  const ok = await confirmDlg({
+    message: t('imagingResetConfirm'),
+    okText: t('imagingReset'),
+    cancelText: t('cancel'),
+    danger: true,
+  });
+  if (!ok) return;
+  const defaults = {
+    Brightness: 0, Contrast: 1, Saturation: 1, Sharpness: 1,
+    AWBMode: 'auto', ExposureMode: 'normal', HFlip: false, VFlip: false,
+  };
+  for (const [name, value] of Object.entries(defaults)) {
+    try {
+      const r = await api.post(`/api/cameras/${cameraId()}/imaging/param`, { name, value });
+      if (r.ok && r.data && r.data.applied === 'restart') beginDeviceRestart();
+    } catch { /* device may already be restarting from a flip reset */ }
+  }
+  if (!restartPending()) loadImaging();
+}
 
 export function initImaging() {
   const section = $('imaging-section');
@@ -50,6 +81,7 @@ async function loadImaging() {
 function renderImaging(params, options) {
   const container = $('imaging-controls');
   if (!container) return;
+  container.className = 'imaging-controls-grid';
   container.innerHTML = '';
 
   for (const cfg of SLIDERS) {
@@ -112,26 +144,6 @@ function buildSelect(name, current, enums) {
     el('label', { className: 'imaging-label', textContent: t('imaging.' + name), for: sel.dataset.param }),
     sel,
   ]);
-}
-
-function postParam(name, value) {
-  clearTimeout(postTimers[name]);
-  postTimers[name] = setTimeout(async () => {
-    const r = await api.post(`/api/cameras/${cameraId()}/imaging/param`, { name, value });
-    if (!r.ok) toast(t('paramError', { name }), 'error');
-  }, 150);
-}
-
-async function resetDefaults() {
-  if (!window.confirm(t('imagingResetConfirm'))) return;
-  const defaults = {
-    Brightness: 0, Contrast: 1, Saturation: 1, Sharpness: 1,
-    AWBMode: 'auto', ExposureMode: 'normal', HFlip: false, VFlip: false,
-  };
-  for (const [name, value] of Object.entries(defaults)) {
-    await api.post(`/api/cameras/${cameraId()}/imaging/param`, { name, value }).catch(() => {});
-  }
-  loadImaging();
 }
 
 function updateFill(slider) {

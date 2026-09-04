@@ -32,6 +32,14 @@ export function initLive() {
     if (document.fullscreenElement) document.exitFullscreen();
     else if (wrapper && wrapper.requestFullscreen) wrapper.requestFullscreen();
   });
+  // Swap expand/compress glyphs with the fullscreen state.
+  document.addEventListener('fullscreenchange', () => {
+    const btn = $('btn-fullscreen');
+    if (!btn) return;
+    const fs = !!document.fullscreenElement;
+    btn.querySelector('.icon-expand')?.classList.toggle('hidden', fs);
+    btn.querySelector('.icon-compress')?.classList.toggle('hidden', !fs);
+  });
   $('btn-snapshot').addEventListener('click', captureSnapshot);
   $('btn-hflip').addEventListener('click', () => {
     store.hflip = !store.hflip;
@@ -84,8 +92,15 @@ export function refreshCameraSelect() {
   store.currentCameraId = sel.value || store.currentCameraId;
 }
 
-export function startLive() {
+export async function startLive() {
   stopLive();
+  // camera.rotation lives in the config doc; fetch it once per session so
+  // the live view honors it without visiting Settings first.
+  if (!store.config) {
+    const cfg = await api.get('/api/config').catch(() => null);
+    if (cfg && cfg.ok) store.config = cfg.data;
+    applyTransform();
+  }
   $('stream-error').classList.add('hidden');
   $('stream-loading').classList.remove('hidden');
   setLoadingLabel(false);
@@ -329,14 +344,17 @@ function startMjpeg(cameraIdArg) {
   const video = $('stream-video');
   const img = $('stream-img');
   video.classList.add('hidden');
-  img.classList.remove('hidden');
+  img.classList.add('hidden'); // hidden until the first frame decodes
   $('mjpeg-fallback-badge').classList.remove('hidden');
   $('stream-loading').classList.add('hidden');
-  img.src = `/api/cameras/${cameraIdArg}/live?_=${Date.now()}`;
-  img.onerror = () => { img.src = ''; setTimeout(() => { img.src = `/api/cameras/${cameraIdArg}/live?_=${Date.now()}`; }, 3000); };
+  const load = () => { img.src = `/api/cameras/${cameraIdArg}/live?_=${Date.now()}`; };
+  img.onload = () => img.classList.remove('hidden');
+  img.onerror = () => { img.classList.add('hidden'); img.src = ''; setTimeout(load, 3000); };
+  load();
   bumpLiveDot();
   return {
     stop() {
+      img.onload = img.onerror = null;
       img.src = '';
       img.classList.add('hidden');
       video.classList.remove('hidden');
@@ -349,13 +367,16 @@ function startPolling(cameraIdArg) {
   const video = $('stream-video');
   const img = $('stream-img');
   video.classList.add('hidden');
-  img.classList.remove('hidden');
+  img.classList.add('hidden');
   const tick = () => { img.src = `/api/cameras/${cameraIdArg}/snapshot?_=${Date.now()}`; };
+  img.onload = () => img.classList.remove('hidden');
+  img.onerror = () => img.classList.add('hidden');
   tick();
   pollTimer = setInterval(tick, 5000);
   return {
     stop() {
       if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+      img.onload = img.onerror = null;
       img.src = '';
       img.classList.add('hidden');
       video.classList.remove('hidden');

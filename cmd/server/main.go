@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/ai"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/camera"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/config"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/h264"
@@ -126,8 +127,14 @@ func initLogging(level string) {
 		slevel = slog.LevelInfo
 	}
 	handler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slevel})
-	slog.SetDefault(slog.New(handler))
+	slog.SetDefault(slog.New(web.NewSlogTeeHandler(handler, mainObserve)))
+	// Also capture any stdlib `log` writers (SPEC §3.2 log ring).
+	mainObserve.AttachLogRing()
 }
+
+// mainObserve is the process-wide observability state, created before
+// logging starts so /api/logs captures everything (SPEC §3.2).
+var mainObserve = web.NewObserve()
 
 // configAdapter wraps config.Config to implement config.ConfigProvider.
 type configAdapter struct {
@@ -146,6 +153,8 @@ func (a *configAdapter) CameraBitrate() int         { return a.cfg.Camera.Bitrat
 func (a *configAdapter) CameraWidth() int           { return a.cfg.Camera.Width }
 func (a *configAdapter) CameraHeight() int          { return a.cfg.Camera.Height }
 func (a *configAdapter) CameraFPS() int             { return a.cfg.Camera.FPS }
+func (a *configAdapter) CameraHFlip() bool          { return a.cfg.Camera.HFlip }
+func (a *configAdapter) CameraVFlip() bool          { return a.cfg.Camera.VFlip }
 func (a *configAdapter) DeviceName() string         { return a.cfg.Device.Name }
 func (a *configAdapter) DeviceManufacturer() string { return a.cfg.Device.Manufacturer }
 func (a *configAdapter) DeviceModel() string        { return a.cfg.Device.Model }
@@ -196,6 +205,11 @@ func main() {
 	cameraParams.Sharpness = float32(cfg.Camera.Sharpness)
 	cameraParams.IDRPeriod = uint32(cfg.Camera.IDRPeriod)
 	cameraParams.Codec = "hardwareH264"
+	// Device-level flips from config: baked into the encoded stream by the
+	// capture backend (libcamera transform), so every consumer (RTSP, ONVIF,
+	// GB28181, recordings, /snapshot) sees them, persistently.
+	cameraParams.HFlip = cfg.Camera.HFlip
+	cameraParams.VFlip = cfg.Camera.VFlip
 	cameraInfo := camera.CameraInfo{
 		Name:         cfg.Device.Name,
 		Manufacturer: cfg.Device.Manufacturer,
@@ -300,6 +314,24 @@ func main() {
 		}
 	}()
 
+	// --- Step 2.5: AI detection (SPEC v1 §4.6; fail-open) ---
+	// Taps the AUHub (passive — never the capture/encode path): an ffmpeg
+	// subprocess decodes keyframes, ONNX Runtime runs NanoDet inference.
+	// NewService returns nil when disabled or unavailable.
+	aiService := ai.NewService(ai.Options{
+		Enabled:             cfg.AI.Enabled,
+		ModelPath:           cfg.AI.ModelPath,
+		OnnxLibPath:         cfg.AI.OnnxLibPath,
+		ConfidenceThreshold: cfg.AI.ConfidenceThreshold,
+		IntervalMs:          cfg.AI.IntervalMs,
+		DecoderBin:          cfg.AI.DecoderBin,
+		VideoW:              uint32(cfg.Camera.Width),
+		VideoH:              uint32(cfg.Camera.Height),
+	}, auHub, ai.NewDetector)
+	if aiService != nil {
+		aiService.Start(ctx)
+	}
+
 	// --- Step 3: RTSP Server (skipped when consuming external RTSP) ---
 	var rtspServer *rtsp.Server
 	if externalRTSPURL != "" {
@@ -343,12 +375,16 @@ func main() {
 			GB28181Config:     &cfg.GB28181,
 			Params:            paramManager,
 			AUHub:             auHub,
+			AI:                aiService,
 			ReadHeaderTimeout: cfg.Web.ReadHeaderTimeout,
 			ReadTimeout:       cfg.Web.ReadTimeout,
 			WriteTimeout:      cfg.Web.WriteTimeout,
 			IdleTimeout:       cfg.Web.IdleTimeout,
 			Snapshot:          snapshotBuffer,
+			Metrics:           metricsCollector,
 		})
+		// Observability (SPEC §3.2): resource snapshot sampler + log ring.
+		go webServer.Observe().RunSampler(ctx, 2*time.Second)
 		go func() {
 			if err := webServer.Start(ctx); err != nil {
 				slog.Warn("web server exited", "error", err)
@@ -483,22 +519,25 @@ func main() {
 		defer metricsServer.Close()
 
 		// Poll loop: snapshot camera drops, AUHub drops, RTSP clients, camera alive
-		go func() {
-			ticker := time.NewTicker(5 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ticker.C:
-					metricsCollector.SetFramesDropped(auHub.DroppedAUs())
-					if rtspServer != nil {
-						metricsCollector.SetRTSPClients(rtspServer.ClientCount())
+			go func() {
+				ticker := time.NewTicker(5 * time.Second)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ticker.C:
+						metricsCollector.SetFramesDropped(auHub.DroppedAUs())
+						if rtspServer != nil {
+							metricsCollector.SetRTSPClients(rtspServer.ClientCount())
+						}
+						// Camera auto-restarts on failure, so it's effectively always alive
+						// once Start() succeeds. Set to 1 unconditionally.
+						metricsCollector.SetCameraAlive(true)
+						if aiService != nil {
+							metricsCollector.SetAIInferences(aiService.Inferences())
+						}
 					}
-					// Camera auto-restarts on failure, so it's effectively always alive
-					// once Start() succeeds. Set to 1 unconditionally.
-					metricsCollector.SetCameraAlive(true)
 				}
-			}
-		}()
+			}()
 		slog.Info("metrics: enabled", "port", cfg.Metrics.Port)
 	} else {
 		slog.Info("metrics: disabled")

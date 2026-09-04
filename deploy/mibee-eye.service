@@ -1,8 +1,10 @@
 [Unit]
 Description=MiBee Eye - ONVIF Camera Server
 After=network.target
-StartLimitIntervalSec=60
-StartLimitBurst=3
+# Deliberate self-restarts (config save; imaging flips bake into the
+# pipeline via restart — SPEC 附录A #9) must not trip the rate limiter.
+StartLimitIntervalSec=180
+StartLimitBurst=10
 Conflicts=mediamtx.service
 
 [Service]

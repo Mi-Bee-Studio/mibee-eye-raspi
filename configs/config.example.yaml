@@ -219,3 +219,22 @@ recording:
 
   # Prune oldest segments above this cap in MB (0 = unlimited)
   max_storage_mb: 8192
+
+# On-device AI object detection (SPEC v1 §4.6; disabled by default).
+# Same NanoDet-Plus model and semantics as the raspi-rs camera. The binary
+# must be built with `-tags ai` (CGO + zig cross-compile; see AGENTS.md) —
+# otherwise the feature reports unavailable and ai stays off (fail-open).
+# Requires ffmpeg on the device (keyframe-only decode; ~5% CPU on Pi 3B)
+# and libonnxruntime.so + the model file at the paths below.
+ai:
+  enabled: false
+  model_path: /var/lib/mibee-eye/models/nanodet-m.onnx
+  onnx_lib_path: /usr/local/lib/libonnxruntime.so
+  # Report detections at/above this confidence (0..1].
+  confidence_threshold: 0.35
+  # Minimum spacing between inferences. Effective cadence is also bounded
+  # by the camera keyframe interval (camera.idr_period) — AI decodes
+  # keyframes only.
+  interval_ms: 1000
+  # ffmpeg binary used to decode H.264 keyframes to RGB.
+  decoder_bin: ffmpeg

@@ -65,6 +65,12 @@ logging: {}
 	if cfg.Camera.Sharpness != 1.0 {
 		t.Errorf("Camera.Sharpness = %f, want %f", cfg.Camera.Sharpness, 1.0)
 	}
+	if cfg.Camera.HFlip {
+		t.Error("Camera.HFlip default = true, want false")
+	}
+	if cfg.Camera.VFlip {
+		t.Error("Camera.VFlip default = true, want false")
+	}
 
 	// RTSP defaults
 	if cfg.RTSP.Port != 8554 {
@@ -127,6 +133,8 @@ camera:
   contrast: 2.0
   saturation: 1.5
   sharpness: 3.0
+  hflip: true
+  vflip: true
 rtsp:
   port: 8555
   username: "testuser"
@@ -169,6 +177,12 @@ logging:
 	}
 	if cfg.Camera.Bitrate != 1_000_000 {
 		t.Errorf("Camera.Bitrate = %d", cfg.Camera.Bitrate)
+	}
+	if !cfg.Camera.HFlip {
+		t.Error("Camera.HFlip = false, want true")
+	}
+	if !cfg.Camera.VFlip {
+		t.Error("Camera.VFlip = false, want true")
 	}
 	if cfg.Camera.Brightness != -0.5 {
 		t.Errorf("Camera.Brightness = %f", cfg.Camera.Brightness)
@@ -582,5 +596,63 @@ logging: {}
 	}
 	if !strings.Contains(err.Error(), "transport") {
 		t.Errorf("error should mention 'transport', got: %v", err)
+	}
+}
+
+func TestAISectionDefaultsAndOverrides(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.AI.Enabled {
+		t.Error("AI must be opt-in (default off)")
+	}
+	if cfg.AI.ModelPath == "" || cfg.AI.OnnxLibPath == "" || cfg.AI.DecoderBin == "" {
+		t.Errorf("AI defaults incomplete: %+v", cfg.AI)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("default config must validate: %v", err)
+	}
+
+	cfgYAML := `
+ai:
+  enabled: true
+  model_path: /opt/models/nanodet-m.onnx
+  onnx_lib_path: /opt/lib/libonnxruntime.so
+  confidence_threshold: 0.4
+  interval_ms: 500
+  decoder_bin: /usr/local/bin/ffmpeg
+`
+	path := writeTempYAML(t, cfgYAML)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if !cfg.AI.Enabled || cfg.AI.ModelPath != "/opt/models/nanodet-m.onnx" ||
+		cfg.AI.OnnxLibPath != "/opt/lib/libonnxruntime.so" ||
+		cfg.AI.ConfidenceThreshold != 0.4 || cfg.AI.IntervalMs != 500 ||
+		cfg.AI.DecoderBin != "/usr/local/bin/ffmpeg" {
+		t.Errorf("AI section misparsed: %+v", cfg.AI)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid AI section rejected: %v", err)
+	}
+}
+
+func TestAISectionValidation(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AI.Enabled = true
+	cfg.AI.ModelPath = ""
+	if err := cfg.Validate(); err == nil {
+		t.Error("empty model_path must be rejected")
+	}
+	cfg = DefaultConfig()
+	cfg.AI.Enabled = true
+	cfg.AI.IntervalMs = 0
+	if err := cfg.Validate(); err == nil {
+		t.Error("zero interval_ms must be rejected")
+	}
+	cfg = DefaultConfig()
+	cfg.AI.Enabled = true
+	cfg.AI.ConfidenceThreshold = 1.5
+	if err := cfg.Validate(); err == nil {
+		t.Error("out-of-range confidence_threshold must be rejected")
 	}
 }
