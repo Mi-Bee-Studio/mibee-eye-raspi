@@ -21,6 +21,7 @@ require (
 	github.com/pion/sdp/v3 v3.0.18 // indirect
 	github.com/pion/srtp/v3 v3.0.10 // indirect
 	github.com/pion/transport/v4 v4.0.1 // indirect
+	github.com/yalue/onnxruntime_go v1.36.0 // indirect
 	golang.org/x/net v0.54.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 )

@@ -132,6 +132,18 @@ type RecordingConfig struct {
 	MaxStorageMB  int    `yaml:"max_storage_mb"` // Prune oldest segments above this cap in MB (0 = unlimited)
 }
 
+// AIConfig configures on-device object detection (SPEC v1 §4.6). The
+// binary must be built with `-tags ai` for inference to be available;
+// otherwise the feature reports unavailable (fail-open).
+type AIConfig struct {
+	Enabled             bool    `yaml:"enabled"`              // master switch (default off)
+	ModelPath           string  `yaml:"model_path"`           // NanoDet ONNX model
+	OnnxLibPath         string  `yaml:"onnx_lib_path"`        // libonnxruntime.so location
+	ConfidenceThreshold float32 `yaml:"confidence_threshold"` // report filter (0..1)
+	IntervalMs          uint64  `yaml:"interval_ms"`          // min spacing between inferences
+	DecoderBin          string  `yaml:"decoder_bin"`          // ffmpeg binary for keyframe decode
+}
+
 // Config is the top-level configuration for MiBee Eye.
 type Config struct {
 	Camera    CameraConfig    `yaml:"camera"`
@@ -146,6 +158,7 @@ type Config struct {
 	HLS       HLSConfig       `yaml:"hls"`
 	GB28181   GB28181Config   `yaml:"gb28181"`
 	Recording RecordingConfig `yaml:"recording"`
+	AI        AIConfig        `yaml:"ai"`
 }
 
 // DefaultConfig returns a Config with all default values.
@@ -242,6 +255,14 @@ func DefaultConfig() *Config {
 			SegmentSecs:   600,
 			RetentionDays: 3,
 			MaxStorageMB:  8192,
+		},
+		AI: AIConfig{
+			Enabled:             false,
+			ModelPath:           "/var/lib/mibee-eye/models/nanodet-m.onnx",
+			OnnxLibPath:         "/usr/local/lib/libonnxruntime.so",
+			ConfidenceThreshold: 0.35,
+			IntervalMs:          1000,
+			DecoderBin:          "ffmpeg",
 		},
 	}
 }
@@ -357,6 +378,13 @@ func applyEnvOverrides(cfg *Config) {
 	overrideInt("MIBEE_EYE_RECORDING_SEGMENT_SECS", &cfg.Recording.SegmentSecs)
 	overrideInt("MIBEE_EYE_RECORDING_RETENTION_DAYS", &cfg.Recording.RetentionDays)
 	overrideInt("MIBEE_EYE_RECORDING_MAX_STORAGE_MB", &cfg.Recording.MaxStorageMB)
+	// AI section
+	overrideBool("MIBEE_EYE_AI_ENABLED", &cfg.AI.Enabled)
+	overrideString("MIBEE_EYE_AI_MODEL_PATH", &cfg.AI.ModelPath)
+	overrideString("MIBEE_EYE_AI_ONNX_LIB_PATH", &cfg.AI.OnnxLibPath)
+	overrideFloat32("MIBEE_EYE_AI_CONFIDENCE_THRESHOLD", &cfg.AI.ConfidenceThreshold)
+	overrideUint64("MIBEE_EYE_AI_INTERVAL_MS", &cfg.AI.IntervalMs)
+	overrideString("MIBEE_EYE_AI_DECODER_BIN", &cfg.AI.DecoderBin)
 }
 
 // Sentinel errors for config validation.
@@ -462,6 +490,17 @@ func (c *Config) Validate() error {
 	if c.Recording.MaxStorageMB < 0 {
 		return fmt.Errorf("config.recording.max_storage_mb: must not be negative")
 	}
+	if c.AI.Enabled {
+		if c.AI.ModelPath == "" {
+			return fmt.Errorf("config.ai.model_path: must not be empty when ai.enabled")
+		}
+		if c.AI.IntervalMs == 0 {
+			return fmt.Errorf("config.ai.interval_ms: %w", errMustBePositive)
+		}
+		if c.AI.ConfidenceThreshold <= 0 || c.AI.ConfidenceThreshold > 1 {
+			return fmt.Errorf("config.ai.confidence_threshold: must be within (0, 1]")
+		}
+	}
 	return nil
 }
 
@@ -483,6 +522,22 @@ func overrideFloat(envName string, dest *float64) {
 	if v, ok := os.LookupEnv(envName); ok {
 		if f, err := strconv.ParseFloat(v, 64); err == nil {
 			*dest = f
+		}
+	}
+}
+
+func overrideFloat32(envName string, dest *float32) {
+	if v, ok := os.LookupEnv(envName); ok {
+		if f, err := strconv.ParseFloat(v, 32); err == nil {
+			*dest = float32(f)
+		}
+	}
+}
+
+func overrideUint64(envName string, dest *uint64) {
+	if v, ok := os.LookupEnv(envName); ok {
+		if n, err := strconv.ParseUint(v, 10, 64); err == nil {
+			*dest = n
 		}
 	}
 }

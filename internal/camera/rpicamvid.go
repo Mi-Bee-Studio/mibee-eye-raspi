@@ -267,6 +267,11 @@ func (c *RPiCamVidCamera) buildArgs() []string {
 		"--inline", // SPS/PPS inline before every IDR (critical for RTSP)
 		"-o", "-",  // raw H.264 Annex-B to stdout
 	}
+	// Keyframe interval (also drives the AI keyframe-decode cadence).
+	// 0 keeps rpicam-vid's default.
+	if p.IDRPeriod > 0 {
+		args = append(args, "--intra", strconv.FormatUint(uint64(p.IDRPeriod), 10))
+	}
 	if c.rotation == 180 {
 		args = append(args, "--rotation", "180")
 	}

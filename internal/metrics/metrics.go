@@ -20,6 +20,7 @@ type Collector struct {
 	rtspClients    int64
 	cameraAlive    int64 // 1 if camera subprocess is alive, 0 otherwise
 	onvifRequests  map[string]uint64
+	aiInferences   uint64
 }
 
 // NewCollector creates a new metrics collector with initialized maps.
@@ -83,6 +84,14 @@ func (c *Collector) IncONVIFRequest(action string) {
 	c.onvifRequests[action]++
 }
 
+// SetAIInferences sets the completed AI detection inferences counter to an
+// absolute value (pulled from the AI service on each poll).
+func (c *Collector) SetAIInferences(n uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.aiInferences = n
+}
+
 // ServeHTTP implements http.Handler and writes all metrics in Prometheus text
 // exposition format (Content-Type: text/plain; version=0.0.4).
 func (c *Collector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -92,6 +101,7 @@ func (c *Collector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	framesDropped := c.framesDropped
 	rtspClients := c.rtspClients
 	cameraAlive := c.cameraAlive
+	aiInferences := c.aiInferences
 
 	// Copy and sort ONVIF request map for deterministic output
 	actions := make([]string, 0, len(c.onvifRequests))
@@ -132,6 +142,11 @@ func (c *Collector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	for _, action := range actions {
 		fmt.Fprintf(w, "mibee_eye_onvif_requests_total{action=%q} %d\n", action, actionCounts[action])
 	}
+
+	// Write AI inferences counter
+	fmt.Fprint(w, "# HELP mibee_eye_ai_inferences_total Total AI detection inferences completed\n")
+	fmt.Fprint(w, "# TYPE mibee_eye_ai_inferences_total counter\n")
+	fmt.Fprintf(w, "mibee_eye_ai_inferences_total %d\n", aiInferences)
 }
 
 // Reset clears all counters and gauges back to zero. Useful for testing.
@@ -143,4 +158,5 @@ func (c *Collector) Reset() {
 	c.rtspClients = 0
 	c.cameraAlive = 0
 	c.onvifRequests = make(map[string]uint64)
+	c.aiInferences = 0
 }

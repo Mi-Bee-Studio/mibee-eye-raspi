@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/ai"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/camera"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/config"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/h264"
@@ -313,6 +314,24 @@ func main() {
 		}
 	}()
 
+	// --- Step 2.5: AI detection (SPEC v1 §4.6; fail-open) ---
+	// Taps the AUHub (passive — never the capture/encode path): an ffmpeg
+	// subprocess decodes keyframes, ONNX Runtime runs NanoDet inference.
+	// NewService returns nil when disabled or unavailable.
+	aiService := ai.NewService(ai.Options{
+		Enabled:             cfg.AI.Enabled,
+		ModelPath:           cfg.AI.ModelPath,
+		OnnxLibPath:         cfg.AI.OnnxLibPath,
+		ConfidenceThreshold: cfg.AI.ConfidenceThreshold,
+		IntervalMs:          cfg.AI.IntervalMs,
+		DecoderBin:          cfg.AI.DecoderBin,
+		VideoW:              uint32(cfg.Camera.Width),
+		VideoH:              uint32(cfg.Camera.Height),
+	}, auHub, ai.NewDetector)
+	if aiService != nil {
+		aiService.Start(ctx)
+	}
+
 	// --- Step 3: RTSP Server (skipped when consuming external RTSP) ---
 	var rtspServer *rtsp.Server
 	if externalRTSPURL != "" {
@@ -356,6 +375,7 @@ func main() {
 			GB28181Config:     &cfg.GB28181,
 			Params:            paramManager,
 			AUHub:             auHub,
+			AI:                aiService,
 			ReadHeaderTimeout: cfg.Web.ReadHeaderTimeout,
 			ReadTimeout:       cfg.Web.ReadTimeout,
 			WriteTimeout:      cfg.Web.WriteTimeout,
@@ -499,22 +519,25 @@ func main() {
 		defer metricsServer.Close()
 
 		// Poll loop: snapshot camera drops, AUHub drops, RTSP clients, camera alive
-		go func() {
-			ticker := time.NewTicker(5 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ticker.C:
-					metricsCollector.SetFramesDropped(auHub.DroppedAUs())
-					if rtspServer != nil {
-						metricsCollector.SetRTSPClients(rtspServer.ClientCount())
+			go func() {
+				ticker := time.NewTicker(5 * time.Second)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ticker.C:
+						metricsCollector.SetFramesDropped(auHub.DroppedAUs())
+						if rtspServer != nil {
+							metricsCollector.SetRTSPClients(rtspServer.ClientCount())
+						}
+						// Camera auto-restarts on failure, so it's effectively always alive
+						// once Start() succeeds. Set to 1 unconditionally.
+						metricsCollector.SetCameraAlive(true)
+						if aiService != nil {
+							metricsCollector.SetAIInferences(aiService.Inferences())
+						}
 					}
-					// Camera auto-restarts on failure, so it's effectively always alive
-					// once Start() succeeds. Set to 1 unconditionally.
-					metricsCollector.SetCameraAlive(true)
 				}
-			}
-		}()
+			}()
 		slog.Info("metrics: enabled", "port", cfg.Metrics.Port)
 	} else {
 		slog.Info("metrics: disabled")

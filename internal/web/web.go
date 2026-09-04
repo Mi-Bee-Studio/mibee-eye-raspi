@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/ai"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/camera"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/config"
 	"github.com/Mi-Bee-Studio/mibee-eye-raspi/internal/h264"
@@ -33,6 +34,7 @@ type Config struct {
 	GB28181Config     *config.GB28181Config // GB28181 configuration
 	Params            *camera.ParamManager  // imaging parameter manager
 	AUHub             *h264.AUHub           // H.264 access-unit hub
+	AI                *ai.Service           // AI detection service (nil = disabled/unavailable)
 	Version           string                // build version from ldflags
 	Logger            *log.Logger           // nil -> log.Default()
 	ReadHeaderTimeout time.Duration         // http.Server.ReadHeaderTimeout (0 = default 5s)
@@ -138,6 +140,17 @@ func (s *Server) Start(ctx context.Context) error {
 		})
 	}
 
+	// AI detections → SSE ai_detection events (SPEC §6).
+	if s.cfg.AI != nil && s.cfg.AI.Active() {
+		events := s.cfg.AI.Events()
+		go func() {
+			for evt := range events {
+				s.hub.broadcast("ai_detection", evt)
+			}
+		}()
+		s.logger.Printf("web: ai detection events enabled (model: %s)", s.cfg.AI.ModelName())
+	}
+
 	s.startTime = time.Now()
 	s.registerRoutes()
 
@@ -232,6 +245,9 @@ func (s *Server) registerRoutes() {
 	m.HandleFunc("GET /api/cameras/{id}/imaging/params", s.authRequired(s.handleGetCameraParams))
 	m.HandleFunc("GET /api/cameras/{id}/imaging/options", s.authRequired(s.handleGetCameraOptions))
 	m.HandleFunc("POST /api/cameras/{id}/imaging/param", s.authRequired(s.handlePostCameraParam))
+
+	// AI detections (SPEC v1 §4.6).
+	m.HandleFunc("GET /api/detections", s.authRequired(s.handleDetections))
 
 	// SSE events (SPEC §6).
 	m.HandleFunc("GET /api/events", s.authRequired(s.handleEvents))

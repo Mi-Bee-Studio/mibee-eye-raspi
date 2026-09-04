@@ -86,6 +86,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 // handleCapabilities (GET /api/capabilities): SPEC §3.1 superset.
 func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	oc := s.cfg.OnvifConfig
+	events := []string{"param_changed"}
+	if s.cfg.AI != nil && s.cfg.AI.Active() {
+		events = append(events, "ai_detection")
+	}
 	caps := map[string]interface{}{
 		"spec_version":      "1",
 		"auth":              map[string]interface{}{"model": "session", "setup": true},
@@ -93,7 +97,7 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		"camera_management": false,
 		"camera_control":    false,
 		"imaging":           s.cfg.Params != nil,
-		"ai":                false,
+		"ai":                s.cfg.AI != nil && s.cfg.AI.Active(),
 		"ptz":               false,
 		"hls":               true,
 		"recording":         false,
@@ -101,7 +105,7 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		"mjpeg":             false, // Go dialect A4: H.264 pipeline has no raw frames
 		"mse":               s.cfg.AUHub != nil,
 		"webrtc":            false,
-		"events":            []string{"param_changed"},
+		"events":            events,
 		"config_apply": map[string]interface{}{
 			"default":  "restart",
 			"sections": map[string]string{"imaging": "immediate"},
@@ -125,6 +129,16 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	}
 	caps["device"] = device
 	writeOK(w, http.StatusOK, caps)
+}
+
+// handleDetections (GET /api/detections): SPEC v1 §4.6. Returns
+// {"enabled":false} when AI is off/unavailable — never fabricated data.
+func (s *Server) handleDetections(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.AI == nil || !s.cfg.AI.Active() {
+		writeOK(w, http.StatusOK, map[string]interface{}{"enabled": false})
+		return
+	}
+	writeOK(w, http.StatusOK, s.cfg.AI.Snapshot())
 }
 
 // cameraDoc builds the single-camera document (SPEC §4).
