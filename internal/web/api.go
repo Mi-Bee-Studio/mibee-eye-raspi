@@ -111,6 +111,11 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 			"auto": true,
 		},
 		"restart": true,
+		"observability": map[string]interface{}{
+			"metrics":  s.cfg.Metrics != nil,
+			"logs":     true,
+			"requests": true,
+		},
 	}
 	device := map[string]interface{}{"name": "MiBee Eye"}
 	if oc != nil {

@@ -126,8 +126,14 @@ func initLogging(level string) {
 		slevel = slog.LevelInfo
 	}
 	handler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slevel})
-	slog.SetDefault(slog.New(handler))
+	slog.SetDefault(slog.New(web.NewSlogTeeHandler(handler, mainObserve)))
+	// Also capture any stdlib `log` writers (SPEC §3.2 log ring).
+	mainObserve.AttachLogRing()
 }
+
+// mainObserve is the process-wide observability state, created before
+// logging starts so /api/logs captures everything (SPEC §3.2).
+var mainObserve = web.NewObserve()
 
 // configAdapter wraps config.Config to implement config.ConfigProvider.
 type configAdapter struct {
@@ -146,8 +152,8 @@ func (a *configAdapter) CameraBitrate() int         { return a.cfg.Camera.Bitrat
 func (a *configAdapter) CameraWidth() int           { return a.cfg.Camera.Width }
 func (a *configAdapter) CameraHeight() int          { return a.cfg.Camera.Height }
 func (a *configAdapter) CameraFPS() int             { return a.cfg.Camera.FPS }
-func (a *configAdapter) CameraHFlip() bool           { return a.cfg.Camera.HFlip }
-func (a *configAdapter) CameraVFlip() bool           { return a.cfg.Camera.VFlip }
+func (a *configAdapter) CameraHFlip() bool          { return a.cfg.Camera.HFlip }
+func (a *configAdapter) CameraVFlip() bool          { return a.cfg.Camera.VFlip }
 func (a *configAdapter) DeviceName() string         { return a.cfg.Device.Name }
 func (a *configAdapter) DeviceManufacturer() string { return a.cfg.Device.Manufacturer }
 func (a *configAdapter) DeviceModel() string        { return a.cfg.Device.Model }
@@ -355,7 +361,10 @@ func main() {
 			WriteTimeout:      cfg.Web.WriteTimeout,
 			IdleTimeout:       cfg.Web.IdleTimeout,
 			Snapshot:          snapshotBuffer,
+			Metrics:           metricsCollector,
 		})
+		// Observability (SPEC §3.2): resource snapshot sampler + log ring.
+		go webServer.Observe().RunSampler(ctx, 2*time.Second)
 		go func() {
 			if err := webServer.Start(ctx); err != nil {
 				slog.Warn("web server exited", "error", err)

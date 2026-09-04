@@ -43,6 +43,7 @@ type Config struct {
 	RTSPStatus        func() bool           // returns RTSP server status (nil = unavailable)
 	FrameRate         func() float64        // returns current fps (nil = unavailable)
 	Snapshot          http.Handler          // GET /snapshot handler (nil = disabled)
+	Metrics           http.Handler          // GET /metrics handler (nil = disabled; SPEC §3.2)
 }
 
 // Server is the web UI HTTP server.
@@ -63,6 +64,8 @@ type Server struct {
 	// Process restart for PUT /api/config and POST /api/system/restart
 	// (SPEC §5.1). Injectable so tests can observe instead of dying.
 	selfRestart func()
+	// Observability state (SPEC §3.2).
+	observe *Observe
 }
 
 // New creates a new web server. An empty password means first-boot state
@@ -98,6 +101,7 @@ func New(cfg Config) *Server {
 
 	return &Server{
 		cfg:            cfg,
+		observe:        NewObserve(),
 		logger:         logger,
 		username:       username,
 		password:       password,
@@ -162,7 +166,7 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	s.server = &http.Server{
 		Addr:              addr,
-		Handler:           s.corsMiddleware(securityHeaders(s.mux)),
+		Handler:           s.corsMiddleware(securityHeaders(s.observeMiddleware(s.mux))),
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
 		WriteTimeout:      writeTimeout,
@@ -231,8 +235,15 @@ func (s *Server) registerRoutes() {
 
 	// SSE events (SPEC §6).
 	m.HandleFunc("GET /api/events", s.authRequired(s.handleEvents))
+	// Observability (SPEC §3.2)
+	m.HandleFunc("GET /api/metrics/summary", s.authRequired(s.handleMetricsSummary))
+	m.HandleFunc("GET /api/logs", s.authRequired(s.handleLogs))
+	m.HandleFunc("GET /api/requests", s.authRequired(s.handleRequests))
 
 	// Legacy snapshot for NVRs — byte-stable, deliberately open (dialect A2).
+	if s.cfg.Metrics != nil {
+		m.Handle("GET /metrics", s.cfg.Metrics)
+	}
 	if s.cfg.Snapshot != nil {
 		m.HandleFunc("GET /snapshot", s.cfg.Snapshot.ServeHTTP)
 	}
@@ -446,3 +457,7 @@ func coerceFloat64(v interface{}) interface{} {
 	}
 	return f
 }
+
+// Observe exposes the shared observability state (SPEC §3.2) so the
+// process-wide sampler and log tee can be wired from main.
+func (s *Server) Observe() *Observe { return s.observe }
